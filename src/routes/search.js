@@ -1,25 +1,22 @@
 const express = require('express');
 const Chat = require('../models/Chat');
 const Message = require('../models/Message');
-const User = require('../models/User');
 const { requireAuth } = require('../middleware/auth');
 const { decryptText } = require('../utils/crypto');
 
 const router = express.Router();
 
-// جستجوی یکجا در کاربران، چت‌های خودم (گروه/خصوصی) و محتوای پیام‌های خودم
+// جستجو فقط داخل چت‌ها/گروه‌ها و پیام‌های خودِ کاربر — عمداً کاربران دیگر اپ را جستجوپذیر نمی‌کند
+// (طبق تصمیم محصول: کشف کاربر فقط از طریق تطبیق مخاطبین در /api/users/contacts/sync انجام می‌شود، نه سرچ آزاد)
 router.get('/', requireAuth, async (req, res) => {
   const { q = '' } = req.query;
   const needle = q.trim();
-  if (!needle) return res.json({ users: [], chats: [], messages: [] });
+  if (!needle) return res.json({ chats: [], messages: [] });
 
-  const [users, myChats] = await Promise.all([
-    User.find({ $text: { $search: needle }, _id: { $ne: req.user._id } })
-      .select('username displayName avatarUrl isOnline')
-      .limit(10),
-    Chat.find({ 'members.user': req.user._id })
-      .populate('members.user', 'username displayName avatarUrl'),
-  ]);
+  const myChats = await Chat.find({ 'members.user': req.user._id }).populate(
+    'members.user',
+    'username displayName avatarUrl'
+  );
 
   const lowerNeedle = needle.toLowerCase();
 
@@ -48,7 +45,7 @@ router.get('/', requireAuth, async (req, res) => {
     .filter((m) => m.content?.toLowerCase().includes(lowerNeedle))
     .slice(0, 20);
 
-  res.json({ users, chats: matchedChats, messages: matchedMessages });
+  res.json({ chats: matchedChats, messages: matchedMessages });
 });
 
 module.exports = router;

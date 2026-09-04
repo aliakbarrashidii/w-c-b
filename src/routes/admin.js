@@ -46,7 +46,7 @@ router.get('/stats', async (req, res) => {
 // --- مدیریت کاربران ---
 router.get('/users', async (req, res) => {
   const { q = '', page = 1, limit = 30 } = req.query;
-  const filter = q ? { $text: { $search: q } } : {};
+  const filter = q ? { $or: [{ username: new RegExp(q, 'i') }, { displayName: new RegExp(q, 'i') }, { phone: new RegExp(q, 'i') }] } : {};
   const users = await User.find(filter)
     .select('-passwordHash')
     .sort({ createdAt: -1 })

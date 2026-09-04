@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema(
     avatarUrl: { type: String, default: '' },
     bio: { type: String, default: '', maxlength: 200 },
     phone: { type: String, default: '' },
+    phoneHash: { type: String, default: null },
     isOnline: { type: Boolean, default: false },
     lastSeen: { type: Date, default: Date.now },
     role: { type: String, enum: ['user', 'moderator', 'admin'], default: 'user' },
@@ -24,6 +25,6 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-userSchema.index({ username: 'text', displayName: 'text' });
+userSchema.index({ phoneHash: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('User', userSchema);

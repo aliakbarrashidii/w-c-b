@@ -44,4 +44,12 @@ function decryptText(payload) {
   }
 }
 
-module.exports = { encryptText, decryptText };
+/**
+ * هش یک‌طرفه‌ی شماره تلفن (برای تطبیق مخاطبین بدون ذخیره یا افشای شماره‌ی خام کسی به کاربر دیگر).
+ * سرور فقط این هش را برای مچ‌کردن مخاطبین استفاده می‌کند، نه شماره‌ی واقعی را.
+ */
+function hashPhone(normalizedPhone) {
+  return crypto.createHash('sha256').update(normalizedPhone).digest('hex');
+}
+
+module.exports = { encryptText, decryptText, hashPhone };

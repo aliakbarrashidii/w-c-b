@@ -5,6 +5,8 @@ const { authenticator } = require('otplib');
 const User = require('../models/User');
 const Session = require('../models/Session');
 const { requireAuth } = require('../middleware/auth');
+const { normalizeIranPhone } = require('../utils/phone');
+const { hashPhone } = require('../utils/crypto');
 
 const router = express.Router();
 
@@ -26,13 +28,78 @@ async function createSession(user, req) {
   return session;
 }
 
+// ثبت‌نام مستقیم داخل اپ (بدون نیاز به ادمین) — فقط نام، شماره موبایل و رمز عبور
+router.post('/register', async (req, res) => {
+  try {
+    const { displayName, phone, password } = req.body;
+    if (!displayName?.trim() || !phone || !password) {
+      return res.status(400).json({ error: 'نام، شماره موبایل و رمز عبور الزامی است' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'رمز عبور باید حداقل ۶ کاراکتر باشد' });
+    }
+
+    const normalizedPhone = normalizeIranPhone(phone);
+    if (!normalizedPhone) {
+      return res.status(400).json({ error: 'فرمت شماره موبایل معتبر نیست (مثال: ۰۹۱۲۳۴۵۶۷۸۹)' });
+    }
+
+    const phoneHash = hashPhone(normalizedPhone);
+    const existing = await User.findOne({ phoneHash });
+    if (existing) return res.status(409).json({ error: 'حسابی با این شماره موبایل قبلاً ساخته شده است' });
+
+    // یوزرنیم داخلی فقط برای ورود جایگزین ساخته می‌شود، جایی به کاربر دیگر نمایش داده نمی‌شود
+    let username = normalizedPhone.replace('+98', '0');
+    let suffix = 0;
+    while (await User.findOne({ username })) {
+      suffix += 1;
+      username = `${normalizedPhone.replace('+98', '0')}_${suffix}`;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await User.create({
+      username,
+      displayName: displayName.trim(),
+      passwordHash,
+      phone: normalizedPhone,
+      phoneHash,
+    });
+
+    const session = await createSession(user, req);
+    user.isOnline = true;
+    user.lastSeen = new Date();
+    await user.save();
+
+    const token = signToken(user, session._id);
+    res.status(201).json({
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        bio: user.bio,
+        role: user.role,
+        theme: user.theme,
+        twoFactorEnabled: user.twoFactorEnabled,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'خطای سرور' });
+  }
+});
+
 // ورود با نام‌کاربری/رمز عبور (کاربرها فعلاً دستی توسط ادمین ساخته می‌شوند)
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'نام کاربری و رمز عبور الزامی است' });
 
-    const user = await User.findOne({ username: username.toLowerCase().trim() });
+    // ورود هم با نام‌کاربری و هم با شماره موبایل پشتیبانی می‌شود
+    const asPhone = normalizeIranPhone(username);
+    const user = asPhone
+      ? await User.findOne({ phoneHash: hashPhone(asPhone) })
+      : await User.findOne({ username: username.toLowerCase().trim() });
     if (!user) return res.status(401).json({ error: 'نام کاربری یا رمز عبور اشتباه است' });
     if (user.status === 'banned') return res.status(403).json({ error: 'حساب شما مسدود شده است' });
 

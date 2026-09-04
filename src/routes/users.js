@@ -4,16 +4,21 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.get('/search', requireAuth, async (req, res) => {
-  const { q = '' } = req.query;
-  if (!q.trim()) return res.json([]);
-  const users = await User.find({
-    $text: { $search: q },
+// تطبیق مخاطبین (مثل تلگرام): کلاینت فقط هش شماره‌های دفترچه تلفن گوشی را می‌فرستد،
+// سرور هرگز شماره‌ی خام را نمی‌بیند و به هیچ کاربر دیگری هم شماره کسی را نشان نمی‌دهد.
+// این جایگزین سرچ آزاد/دفترتلفن عمومی است — کاربری که مخاطبش نیستی قابل کشف نیست.
+router.post('/contacts/sync', requireAuth, async (req, res) => {
+  const { hashes = [] } = req.body;
+  if (!Array.isArray(hashes) || hashes.length === 0) return res.json([]);
+  if (hashes.length > 5000) return res.status(400).json({ error: 'تعداد مخاطبین بیش از حد مجاز است' });
+
+  const matches = await User.find({
+    phoneHash: { $in: hashes },
     _id: { $ne: req.user._id },
-  })
-    .select('username displayName avatarUrl bio isOnline lastSeen')
-    .limit(20);
-  res.json(users);
+    status: 'active',
+  }).select('username displayName avatarUrl bio isOnline lastSeen');
+
+  res.json(matches);
 });
 
 router.get('/:id', requireAuth, async (req, res) => {

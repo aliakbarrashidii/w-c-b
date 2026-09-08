@@ -9,7 +9,7 @@ const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
  * Expo خودش پیام را به FCM/APNs واقعی روی هر پلتفرم تحویل می‌دهد.
  * برای بیلد نهایی پروداکشن (EAS Build)، Expo از پروژه Firebase خودت هم پشتیبانی می‌کند.
  */
-async function sendPushNotifications(tokens = [], { title, body, data = {} }) {
+async function sendPushNotifications(tokens = [], { title, body, data = {}, sound = 'default' }) {
   const validTokens = tokens.filter((t) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
   if (validTokens.length === 0) return;
 
@@ -18,7 +18,7 @@ async function sendPushNotifications(tokens = [], { title, body, data = {} }) {
     title,
     body,
     data,
-    sound: 'default',
+    sound: sound || undefined,
     priority: 'high',
   }));
 

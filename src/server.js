@@ -1,5 +1,6 @@
 require('dotenv').config();
 const dns = require('dns');
+const path = require('path');
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -12,11 +13,14 @@ const authRoutes = require('./routes/auth');
 const chatRoutes = require('./routes/chats');
 const userRoutes = require('./routes/users');
 const searchRoutes = require('./routes/search');
+const callRoutes = require('./routes/calls');
+const mediaRoutes = require('./routes/media');
+const folderRoutes = require('./routes/folders');
+const wallpaperRoutes = require('./routes/wallpapers');
 const adminRoutes = require('./routes/admin');
 const initSocket = require('./socket');
 
 const app = express();
-app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
@@ -32,12 +36,18 @@ app.use(
 );
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/chats', chatRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/calls', callRoutes);
+app.use('/api/media', mediaRoutes);
+app.use('/api/folders', folderRoutes);
+app.use('/api/wallpapers', wallpaperRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/wallpapers', express.static(path.join(__dirname, '..', 'wallpapers')));
 
 app.use((err, req, res, next) => {
   console.error(err);

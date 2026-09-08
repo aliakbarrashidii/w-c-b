@@ -4,6 +4,7 @@ const messageSchema = new mongoose.Schema(
   {
     chat: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', required: true, index: true },
     sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    clientId: { type: String, default: null }, // شناسه‌ی سمت کلاینت برای جلوگیری از پیام تکراری (Optimistic UI)
     type: { type: String, enum: ['text', 'image', 'video', 'file', 'voice', 'call_log'], default: 'text' },
     content: { type: String, default: '' },
     mediaUrl: { type: String, default: '' },
@@ -34,6 +35,12 @@ const messageSchema = new mongoose.Schema(
         readAt: { type: Date, default: Date.now },
       },
     ],
+    deliveredTo: [
+      {
+        user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        deliveredAt: { type: Date, default: Date.now },
+      },
+    ],
     flagged: { type: Boolean, default: false },
     flagReason: { type: String, default: '' },
   },
@@ -41,6 +48,7 @@ const messageSchema = new mongoose.Schema(
 );
 
 messageSchema.index({ chat: 1, createdAt: -1 });
+messageSchema.index({ chat: 1, sender: 1, clientId: 1 });
 // توجه: content روی دیتابیس رمزنگاری‌شده ذخیره می‌شود (utils/crypto.js)،
 // بنابراین دیگر ایندکس متنی روی آن معنا ندارد؛ جستجو در سطح اپلیکیشن پس از رمزگشایی انجام می‌شود.
 

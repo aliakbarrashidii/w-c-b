@@ -22,9 +22,16 @@ router.post('/contacts/sync', requireAuth, async (req, res) => {
 });
 
 router.get('/:id', requireAuth, async (req, res) => {
-  const user = await User.findById(req.params.id).select('username displayName avatarUrl bio isOnline lastSeen');
+  const user = await User.findById(req.params.id).select('username displayName avatarUrl bio isOnline lastSeen privacy');
   if (!user) return res.status(404).json({ error: 'کاربر یافت نشد' });
-  res.json(user);
+
+  const obj = user.toObject();
+  if (obj.privacy?.lastSeenVisibility === 'nobody' && req.params.id !== req.user._id.toString()) {
+    obj.isOnline = false;
+    obj.lastSeen = null;
+  }
+  delete obj.privacy;
+  res.json(obj);
 });
 
 router.post('/:id/block', requireAuth, async (req, res) => {
@@ -37,6 +44,21 @@ router.post('/:id/block', requireAuth, async (req, res) => {
 
 router.post('/:id/unblock', requireAuth, async (req, res) => {
   req.user.blockedUsers = req.user.blockedUsers.filter((id) => id.toString() !== req.params.id);
+  await req.user.save();
+  res.json({ ok: true });
+});
+
+// یادداشت خصوصی روی یک مخاطب — فقط خودم می‌بینم، هیچ‌وقت به کسی دیگه نمایش داده نمی‌شه
+router.get('/:id/note', requireAuth, async (req, res) => {
+  const entry = req.user.contactNotes.find((n) => n.contact.toString() === req.params.id);
+  res.json({ note: entry?.note || '' });
+});
+
+router.put('/:id/note', requireAuth, async (req, res) => {
+  const { note = '' } = req.body;
+  const entry = req.user.contactNotes.find((n) => n.contact.toString() === req.params.id);
+  if (entry) entry.note = note;
+  else req.user.contactNotes.push({ contact: req.params.id, note });
   await req.user.save();
   res.json({ ok: true });
 });

@@ -16,10 +16,32 @@ const userSchema = new mongoose.Schema(
     suspendedUntil: { type: Date, default: null },
     banReason: { type: String, default: '' },
     theme: { type: String, enum: ['light', 'dark', 'system'], default: 'system' },
+    defaultWallpaper: { type: String, default: null }, // پس‌زمینه‌ی پیش‌فرض همه‌ی چت‌ها (رنگ هگز یا URL عکس)
     blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    contactNotes: [
+      {
+        contact: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        note: { type: String, default: '', maxlength: 500 },
+      },
+    ],
     pushTokens: [{ type: String }],
     twoFactorEnabled: { type: Boolean, default: false },
     twoFactorSecret: { type: String, default: '' },
+    privacy: {
+      lastSeenVisibility: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
+      readReceiptsEnabled: { type: Boolean, default: true },
+    },
+    notificationSettings: {
+      enabled: { type: Boolean, default: true },
+      sound: { type: Boolean, default: true },
+      preview: { type: Boolean, default: true },
+    },
+    folders: [
+      {
+        name: { type: String, required: true, maxlength: 30 },
+        chatIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Chat' }],
+      },
+    ],
     createdByAdmin: { type: Boolean, default: false },
   },
   { timestamps: true }

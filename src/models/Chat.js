@@ -13,6 +13,10 @@ const chatSchema = new mongoose.Schema(
         role: { type: String, enum: ['member', 'admin', 'owner'], default: 'member' },
         joinedAt: { type: Date, default: Date.now },
         mutedUntil: { type: Date, default: null },
+        archived: { type: Boolean, default: false },
+        pinnedInList: { type: Boolean, default: false },
+        clearedAt: { type: Date, default: null },
+        wallpaper: { type: String, default: null }, // رنگ هگز اختصاصی این چت برای همین کاربر، یا null = پیش‌فرض تم // پیام‌های قبل از این تاریخ برای همین کاربر نمایش داده نمی‌شن ("پاک کردن تاریخچه")
       },
     ],
     lastMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },

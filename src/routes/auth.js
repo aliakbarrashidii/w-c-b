@@ -82,6 +82,8 @@ router.post('/register', async (req, res) => {
         role: user.role,
         theme: user.theme,
         twoFactorEnabled: user.twoFactorEnabled,
+        privacy: user.privacy,
+        notificationSettings: user.notificationSettings,
       },
     });
   } catch (err) {
@@ -127,6 +129,8 @@ router.post('/login', async (req, res) => {
         role: user.role,
         theme: user.theme,
         twoFactorEnabled: user.twoFactorEnabled,
+        privacy: user.privacy,
+        notificationSettings: user.notificationSettings,
       },
     });
   } catch (err) {
@@ -171,6 +175,8 @@ router.post('/login/2fa', async (req, res) => {
         role: user.role,
         theme: user.theme,
         twoFactorEnabled: user.twoFactorEnabled,
+        privacy: user.privacy,
+        notificationSettings: user.notificationSettings,
       },
     });
   } catch (err) {
@@ -189,17 +195,38 @@ router.get('/me', requireAuth, async (req, res) => {
     role: u.role,
     theme: u.theme,
     twoFactorEnabled: u.twoFactorEnabled,
+    privacy: u.privacy,
+    notificationSettings: u.notificationSettings,
+    defaultWallpaper: u.defaultWallpaper,
   });
 });
 
 router.patch('/me', requireAuth, async (req, res) => {
-  const { displayName, bio, avatarUrl, theme } = req.body;
+  const { displayName, bio, avatarUrl, theme, defaultWallpaper } = req.body;
   if (displayName !== undefined) req.user.displayName = displayName;
   if (bio !== undefined) req.user.bio = bio;
   if (avatarUrl !== undefined) req.user.avatarUrl = avatarUrl;
   if (theme !== undefined) req.user.theme = theme;
+  if (defaultWallpaper !== undefined) req.user.defaultWallpaper = defaultWallpaper;
   await req.user.save();
-  res.json({ ok: true });
+  res.json({ ok: true, defaultWallpaper: req.user.defaultWallpaper });
+});
+
+router.patch('/me/privacy', requireAuth, async (req, res) => {
+  const { lastSeenVisibility, readReceiptsEnabled } = req.body;
+  if (lastSeenVisibility !== undefined) req.user.privacy.lastSeenVisibility = lastSeenVisibility;
+  if (readReceiptsEnabled !== undefined) req.user.privacy.readReceiptsEnabled = readReceiptsEnabled;
+  await req.user.save();
+  res.json({ ok: true, privacy: req.user.privacy });
+});
+
+router.patch('/me/notifications', requireAuth, async (req, res) => {
+  const { enabled, sound, preview } = req.body;
+  if (enabled !== undefined) req.user.notificationSettings.enabled = enabled;
+  if (sound !== undefined) req.user.notificationSettings.sound = sound;
+  if (preview !== undefined) req.user.notificationSettings.preview = preview;
+  await req.user.save();
+  res.json({ ok: true, notificationSettings: req.user.notificationSettings });
 });
 
 router.post('/logout', requireAuth, async (req, res) => {

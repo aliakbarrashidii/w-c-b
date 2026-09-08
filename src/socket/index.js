@@ -54,23 +54,62 @@ module.exports = function initSocket(io) {
     const chats = await Chat.find({ 'members.user': userId }).select('_id');
     chats.forEach((c) => socket.join(`chat:${c._id}`));
 
+    // پیام‌هایی که وقتی کاربر آفلاین بوده براش اومده، همین لحظه که وصل شد delivered می‌شن
+    for (const c of chats) {
+      const pending = await Message.find({
+        chat: c._id,
+        sender: { $ne: userId },
+        'deliveredTo.user': { $ne: userId },
+        deletedForEveryone: { $ne: true },
+      }).select('_id chat');
+      if (pending.length) {
+        await Message.updateMany(
+          { _id: { $in: pending.map((m) => m._id) } },
+          { $addToSet: { deliveredTo: { user: userId, deliveredAt: new Date() } } }
+        );
+        io.to(`chat:${c._id}`).emit('message:delivered', {
+          chatId: c._id,
+          messageIds: pending.map((m) => m._id),
+          toUserIds: [userId],
+        });
+      }
+    }
+
     // --- پیام‌رسانی ---
     socket.on('message:send', async (data, ack) => {
       try {
-        const { chatId, type = 'text', content = '', mediaUrl = '', mediaMeta = {}, replyTo = null } = data;
+        const { chatId, type = 'text', content = '', mediaUrl = '', mediaMeta = {}, replyTo = null, clientId = null } = data;
         const chat = await Chat.findById(chatId);
         if (!chat) return ack?.({ error: 'چت یافت نشد' });
         const isMember = chat.members.some((m) => m.user.toString() === userId);
         if (!isMember) return ack?.({ error: 'شما عضو این چت نیستید' });
 
+        // جلوگیری از پیام تکراری: اگر همین clientId قبلاً از همین فرستنده ثبت شده، همون رو برگردون
+        // (مثلاً وقتی سوکت لحظه‌ای قطع/وصل شده و کلاینت دوباره تلاش کرده)
+        if (clientId) {
+          const existing = await Message.findOne({ chat: chatId, sender: userId, clientId });
+          if (existing) {
+            await existing.populate('sender', 'username displayName avatarUrl');
+            const dup = existing.toObject();
+            dup.content = decryptText(dup.content);
+            return ack?.({ ok: true, message: dup, duplicate: true });
+          }
+        }
+
+        const onlineMemberIds = chat.members
+          .filter((m) => m.user.toString() !== userId && isOnline(m.user.toString()))
+          .map((m) => m.user);
+
         const message = await Message.create({
           chat: chatId,
           sender: userId,
+          clientId,
           type,
           content: encryptText(content),
           mediaUrl,
           mediaMeta,
           replyTo,
+          deliveredTo: onlineMemberIds.map((u) => ({ user: u })), // گیرنده‌های آنلاین همون لحظه delivered حساب می‌شن
         });
         await message.populate('sender', 'username displayName avatarUrl');
 
@@ -85,17 +124,27 @@ module.exports = function initSocket(io) {
         io.to(`chat:${chatId}`).emit('message:new', outgoing);
         ack?.({ ok: true, message: outgoing });
 
-        // نوتیفیکیشن پوش برای اعضایی که الان روی سوکت آنلاین نیستند
+        if (onlineMemberIds.length) {
+          socket.to(`chat:${chatId}`).emit('message:delivered', { chatId, messageIds: [message._id], toUserIds: onlineMemberIds });
+        }
+
+        // نوتیفیکیشن پوش برای اعضایی که الان روی سوکت آنلاین نیستند (هرکس طبق تنظیمات خودش)
         const offlineMembers = chat.members.filter((m) => m.user.toString() !== userId && !isOnline(m.user.toString()));
         if (offlineMembers.length) {
-          const recipientUsers = await User.find({ _id: { $in: offlineMembers.map((m) => m.user) } }).select('pushTokens');
-          const tokens = recipientUsers.flatMap((u) => u.pushTokens);
+          const recipientUsers = await User.find({ _id: { $in: offlineMembers.map((m) => m.user) } }).select(
+            'pushTokens notificationSettings'
+          );
           const previewText = type === 'text' ? content : type === 'image' ? '📷 عکس' : type === 'voice' ? '🎤 پیام صوتی' : 'فایل جدید';
-          sendPushNotifications(tokens, {
-            title: socket.user.displayName,
-            body: previewText.slice(0, 120),
-            data: { chatId, type: 'message' },
-          });
+          for (const recipient of recipientUsers) {
+            const settings = recipient.notificationSettings || {};
+            if (settings.enabled === false) continue; // این کاربر نوتیفیکیشن پیام رو غیرفعال کرده
+            sendPushNotifications(recipient.pushTokens, {
+              title: socket.user.displayName,
+              body: settings.preview === false ? 'پیام جدید' : previewText.slice(0, 120),
+              sound: settings.sound === false ? null : 'default',
+              data: { chatId, type: 'message' },
+            });
+          }
         }
       } catch (err) {
         ack?.({ error: 'ارسال پیام ناموفق بود' });
@@ -113,15 +162,20 @@ module.exports = function initSocket(io) {
 
     socket.on('message:delete', async ({ messageId, forEveryone }) => {
       const message = await Message.findById(messageId);
-      if (!message || message.sender.toString() !== userId) return;
+      if (!message) return;
+      const isSender = message.sender.toString() === userId;
       if (forEveryone) {
+        if (!isSender) return; // فقط فرستنده می‌تونه برای همه حذف کنه
         message.deletedForEveryone = true;
         message.content = '';
         await message.save();
         io.to(`chat:${message.chat}`).emit('message:deleted', { messageId, forEveryone: true });
       } else {
-        message.deletedFor.push(userId);
-        await message.save();
+        // حذف فقط برای خودم — هر عضو چت می‌تونه این کارو با هر پیامی بکنه
+        if (!message.deletedFor.some((id) => id.toString() === userId)) {
+          message.deletedFor.push(userId);
+          await message.save();
+        }
         socket.emit('message:deleted', { messageId, forEveryone: false });
       }
     });

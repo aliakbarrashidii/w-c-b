@@ -6,6 +6,7 @@ const userSchema = new mongoose.Schema(
     displayName: { type: String, required: true, trim: true },
     passwordHash: { type: String, required: true },
     avatarUrl: { type: String, default: '' },
+    avatarUrls: [{ type: String }], // تاریخچه‌ی عکس‌های پروفایل — می‌تونه چندتا داشته باشه، avatarUrl همیشه فعلی‌شه
     bio: { type: String, default: '', maxlength: 200 },
     phone: { type: String, default: '' },
     phoneHash: { type: String, default: null },
@@ -17,6 +18,7 @@ const userSchema = new mongoose.Schema(
     banReason: { type: String, default: '' },
     theme: { type: String, enum: ['light', 'dark', 'system'], default: 'system' },
     defaultWallpaper: { type: String, default: null }, // پس‌زمینه‌ی پیش‌فرض همه‌ی چت‌ها (رنگ هگز یا URL عکس)
+    coverId: { type: String, default: 'blue' }, // کاور پروفایل - یکی از پیش‌فرض‌های همراه اپ (blue/sunset/teal/dark/warm)
     blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     contactNotes: [
       {
@@ -29,6 +31,7 @@ const userSchema = new mongoose.Schema(
     twoFactorSecret: { type: String, default: '' },
     privacy: {
       lastSeenVisibility: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
+      lastSeenExceptions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // اگه everyone: این‌ها استثنا و ازشون مخفیه؛ اگه nobody: فقط این‌ها می‌بینن
       readReceiptsEnabled: { type: Boolean, default: true },
     },
     notificationSettings: {

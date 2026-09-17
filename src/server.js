@@ -17,11 +17,14 @@ const callRoutes = require('./routes/calls');
 const mediaRoutes = require('./routes/media');
 const folderRoutes = require('./routes/folders');
 const wallpaperRoutes = require('./routes/wallpapers');
+const activityRoutes = require('./routes/activity');
+const reportRoutes = require('./routes/reports');
 const adminRoutes = require('./routes/admin');
+const deviceRoutes = require('./routes/devices');
+const moderationRoutes = require('./routes/moderation');
 const initSocket = require('./socket');
 
 const app = express();
-app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
@@ -47,7 +50,11 @@ app.use('/api/calls', callRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/folders', folderRoutes);
 app.use('/api/wallpapers', wallpaperRoutes);
+app.use('/api/activity', activityRoutes);
+app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/devices', deviceRoutes);
+app.use('/api/moderation', moderationRoutes);
 app.use('/wallpapers', express.static(path.join(__dirname, '..', 'wallpapers')));
 
 app.use((err, req, res, next) => {

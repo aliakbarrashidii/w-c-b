@@ -19,7 +19,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // ۲۵ مگابایت — برای عکس/ویس کافیه؛ برای ویدیوی بزرگ باید سرویس جدا (مثل Cloudinary) گذاشت
+  limits: { fileSize: 50 * 1024 * 1024 }, // ۵۰ مگابایت — برای عکس/ویس/ویدیوی کوتاه کافیه؛ برای ویدیوی بزرگ‌تر باید سرویس جدا (مثل Cloudinary) گذاشت
 });
 
 // آپلود عکس/ویس/فایل — خروجی یه URL که مستقیم در mediaUrl پیام استفاده می‌شه

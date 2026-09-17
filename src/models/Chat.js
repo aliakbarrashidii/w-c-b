@@ -2,7 +2,11 @@ const mongoose = require('mongoose');
 
 const chatSchema = new mongoose.Schema(
   {
-    type: { type: String, enum: ['private', 'group', 'saved'], required: true },
+    type: { type: String, enum: ['private', 'group', 'channel', 'secret', 'saved'], required: true },
+    secretSettings: {
+      ttlSeconds: { type: Number, default: 0 }, // ۰ یعنی خودتخریب خاموشه
+      passphraseHash: { type: String, default: null }, // فقط برای تایید «همون عبارت رو زدید»، نه خودِ کلید
+    },
     pinnedMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
     title: { type: String, default: '' }, // group only
     avatarUrl: { type: String, default: '' }, // group only

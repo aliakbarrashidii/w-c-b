@@ -4,6 +4,8 @@ const jwt = require('jsonwebtoken');
 const { authenticator } = require('otplib');
 const User = require('../models/User');
 const Session = require('../models/Session');
+const InviteCode = require('../models/InviteCode');
+const ContactRequest = require('../models/ContactRequest');
 const { requireAuth } = require('../middleware/auth');
 const { normalizeIranPhone } = require('../utils/phone');
 const { hashPhone } = require('../utils/crypto');
@@ -31,9 +33,16 @@ async function createSession(user, req) {
 // ثبت‌نام مستقیم داخل اپ (بدون نیاز به ادمین) — فقط نام، شماره موبایل و رمز عبور
 router.post('/register', async (req, res) => {
   try {
-    const { displayName, phone, password } = req.body;
+    const { displayName, phone, password, inviteCode } = req.body;
     if (!displayName?.trim() || !phone || !password) {
       return res.status(400).json({ error: 'نام، شماره موبایل و رمز عبور الزامی است' });
+    }
+    if (!inviteCode?.trim()) {
+      return res.status(400).json({ error: 'ثبت‌نام فقط با کد دعوت امکان‌پذیر است' });
+    }
+    const invite = await InviteCode.findOne({ code: inviteCode.trim().toUpperCase(), usedBy: null });
+    if (!invite) {
+      return res.status(400).json({ error: 'کد دعوت نامعتبر یا قبلاً استفاده‌شده است' });
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'رمز عبور باید حداقل ۶ کاراکتر باشد' });
@@ -65,6 +74,10 @@ router.post('/register', async (req, res) => {
       phoneHash,
     });
 
+    invite.usedBy = user._id;
+    invite.usedAt = new Date();
+    await invite.save();
+
     const session = await createSession(user, req);
     user.isOnline = true;
     user.lastSeen = new Date();
@@ -89,6 +102,14 @@ router.post('/register', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'خطای سرور' });
   }
+});
+
+// پیام تماس با ادمین قبل از ثبت‌نام (وقتی کد دعوت نداری) — نیازی به لاگین نداره
+router.post('/contact-request', async (req, res) => {
+  const { name, phone, message } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'نام الزامی است' });
+  await ContactRequest.create({ name: name.trim(), phone: phone?.trim() || '', message: message?.trim() || '' });
+  res.status(201).json({ ok: true });
 });
 
 // ورود با نام‌کاربری/رمز عبور (کاربرها فعلاً دستی توسط ادمین ساخته می‌شوند)
@@ -185,6 +206,7 @@ router.post('/login/2fa', async (req, res) => {
 });
 
 router.get('/me', requireAuth, async (req, res) => {
+  await req.user.populate('privacy.lastSeenExceptions', 'username displayName avatarUrl');
   const u = req.user;
   res.json({
     id: u._id,
@@ -198,25 +220,49 @@ router.get('/me', requireAuth, async (req, res) => {
     privacy: u.privacy,
     notificationSettings: u.notificationSettings,
     defaultWallpaper: u.defaultWallpaper,
+    avatarUrls: u.avatarUrls,
+    coverId: u.coverId,
   });
 });
 
 router.patch('/me', requireAuth, async (req, res) => {
-  const { displayName, bio, avatarUrl, theme, defaultWallpaper } = req.body;
+  const { displayName, bio, avatarUrl, theme, defaultWallpaper, coverId } = req.body;
   if (displayName !== undefined) req.user.displayName = displayName;
   if (bio !== undefined) req.user.bio = bio;
   if (avatarUrl !== undefined) req.user.avatarUrl = avatarUrl;
   if (theme !== undefined) req.user.theme = theme;
   if (defaultWallpaper !== undefined) req.user.defaultWallpaper = defaultWallpaper;
+  if (coverId !== undefined) req.user.coverId = coverId;
   await req.user.save();
-  res.json({ ok: true, defaultWallpaper: req.user.defaultWallpaper });
+  res.json({ ok: true, defaultWallpaper: req.user.defaultWallpaper, coverId: req.user.coverId });
+});
+
+// افزودن عکس پروفایل جدید (به آرشیو اضافه می‌شه و همون لحظه فعلی می‌شه)
+router.post('/me/avatars', requireAuth, async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'آدرس عکس الزامی است' });
+  if (!req.user.avatarUrls.includes(url)) req.user.avatarUrls.unshift(url);
+  req.user.avatarUrl = url;
+  await req.user.save();
+  res.json({ ok: true, avatarUrl: url, avatarUrls: req.user.avatarUrls });
+});
+
+// حذف یکی از عکس‌های پروفایل قدیمی
+router.delete('/me/avatars', requireAuth, async (req, res) => {
+  const { url } = req.body;
+  req.user.avatarUrls = req.user.avatarUrls.filter((u) => u !== url);
+  if (req.user.avatarUrl === url) req.user.avatarUrl = req.user.avatarUrls[0] || '';
+  await req.user.save();
+  res.json({ ok: true, avatarUrl: req.user.avatarUrl, avatarUrls: req.user.avatarUrls });
 });
 
 router.patch('/me/privacy', requireAuth, async (req, res) => {
-  const { lastSeenVisibility, readReceiptsEnabled } = req.body;
+  const { lastSeenVisibility, readReceiptsEnabled, lastSeenExceptions } = req.body;
   if (lastSeenVisibility !== undefined) req.user.privacy.lastSeenVisibility = lastSeenVisibility;
   if (readReceiptsEnabled !== undefined) req.user.privacy.readReceiptsEnabled = readReceiptsEnabled;
+  if (lastSeenExceptions !== undefined) req.user.privacy.lastSeenExceptions = lastSeenExceptions;
   await req.user.save();
+  await req.user.populate('privacy.lastSeenExceptions', 'username displayName avatarUrl');
   res.json({ ok: true, privacy: req.user.privacy });
 });
 
@@ -288,6 +334,33 @@ router.post('/2fa/disable', requireAuth, async (req, res) => {
   req.user.twoFactorSecret = '';
   await req.user.save();
   res.json({ ok: true });
+});
+
+// تغییر رمز عبور — لازمه چون خیلی از حساب‌ها رو ادمین/ناظر با یه رمز موقت می‌سازه
+router.post('/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'رمز جدید باید حداقل ۶ کاراکتر باشد' });
+  }
+  const valid = await bcrypt.compare(currentPassword || '', req.user.passwordHash);
+  if (!valid) return res.status(401).json({ error: 'رمز فعلی اشتباه است' });
+  req.user.passwordHash = await bcrypt.hash(newPassword, 10);
+  await req.user.save();
+  res.json({ ok: true });
+});
+
+// تغییر نام کاربری/آیدی (برای اینکه دیگران بتونن با آیدی پیدات کنن، نه فقط شماره)
+router.patch('/me/username', requireAuth, async (req, res) => {
+  const { username } = req.body;
+  const clean = (username || '').toLowerCase().trim();
+  if (!/^[a-z0-9_]{4,32}$/.test(clean)) {
+    return res.status(400).json({ error: 'آیدی باید ۴ تا ۳۲ کاراکتر انگلیسی/عدد/آندرلاین باشد' });
+  }
+  const exists = await User.findOne({ username: clean, _id: { $ne: req.user._id } });
+  if (exists) return res.status(409).json({ error: 'این آیدی قبلاً گرفته شده است' });
+  req.user.username = clean;
+  await req.user.save();
+  res.json({ ok: true, username: clean });
 });
 
 module.exports = router;

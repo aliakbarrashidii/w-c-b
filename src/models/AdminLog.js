@@ -14,6 +14,7 @@ const adminLogSchema = new mongoose.Schema(
         'unban_user',
         'create_user',
         'view_user_profile',
+        'update_settings',
       ],
       required: true,
     },

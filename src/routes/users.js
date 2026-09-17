@@ -4,6 +4,14 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
+// پیدا کردن دقیق یک کاربر با آیدی (یوزرنیم) — نه سرچ آزاد؛ باید آیدی رو از قبل بدونی
+router.get('/by-username/:username', requireAuth, async (req, res) => {
+  const clean = req.params.username.toLowerCase().trim().replace(/^@/, '');
+  const user = await User.findOne({ username: clean, status: 'active' }).select('username displayName avatarUrl bio isOnline lastSeen coverId');
+  if (!user) return res.status(404).json({ error: 'کاربری با این آیدی پیدا نشد' });
+  res.json(user);
+});
+
 // تطبیق مخاطبین (مثل تلگرام): کلاینت فقط هش شماره‌های دفترچه تلفن گوشی را می‌فرستد،
 // سرور هرگز شماره‌ی خام را نمی‌بیند و به هیچ کاربر دیگری هم شماره کسی را نشان نمی‌دهد.
 // این جایگزین سرچ آزاد/دفترتلفن عمومی است — کاربری که مخاطبش نیستی قابل کشف نیست.
@@ -16,19 +24,27 @@ router.post('/contacts/sync', requireAuth, async (req, res) => {
     phoneHash: { $in: hashes },
     _id: { $ne: req.user._id },
     status: 'active',
-  }).select('username displayName avatarUrl bio isOnline lastSeen');
+  }).select('username displayName avatarUrl bio isOnline lastSeen coverId');
 
   res.json(matches);
 });
 
 router.get('/:id', requireAuth, async (req, res) => {
-  const user = await User.findById(req.params.id).select('username displayName avatarUrl bio isOnline lastSeen privacy');
+  const user = await User.findById(req.params.id).select('username displayName avatarUrl bio isOnline lastSeen privacy coverId');
   if (!user) return res.status(404).json({ error: 'کاربر یافت نشد' });
 
   const obj = user.toObject();
-  if (obj.privacy?.lastSeenVisibility === 'nobody' && req.params.id !== req.user._id.toString()) {
-    obj.isOnline = false;
-    obj.lastSeen = null;
+  const isSelf = req.params.id === req.user._id.toString();
+  if (!isSelf) {
+    const mode = obj.privacy?.lastSeenVisibility || 'everyone';
+    const exceptions = (obj.privacy?.lastSeenExceptions || []).map((id) => id.toString());
+    const isException = exceptions.includes(req.user._id.toString());
+    // everyone + تو تو لیست استثنایی: ازت مخفیه. nobody + تو تو لیست استثنایی: برات نشون داده می‌شه.
+    const hidden = mode === 'everyone' ? isException : !isException;
+    if (hidden) {
+      obj.isOnline = false;
+      obj.lastSeen = null;
+    }
   }
   delete obj.privacy;
   res.json(obj);

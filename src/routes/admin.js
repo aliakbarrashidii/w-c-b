@@ -6,8 +6,14 @@ const Chat = require('../models/Chat');
 const Message = require('../models/Message');
 const CallLog = require('../models/CallLog');
 const AdminLog = require('../models/AdminLog');
+const InviteCode = require('../models/InviteCode');
+const ContactRequest = require('../models/ContactRequest');
+const Report = require('../models/Report');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { encryptText, decryptText } = require('../utils/crypto');
+const { getSettings, updateSettings } = require('../utils/settings');
+const ModerationModel = require('../models/ModerationModel');
+const EncryptedReport = require('../models/EncryptedReport');
 
 const router = express.Router();
 
@@ -61,6 +67,10 @@ router.post('/users', async (req, res) => {
   const { username, displayName, password, role = 'user' } = req.body;
   if (!username || !displayName || !password) {
     return res.status(400).json({ error: 'همه فیلدها الزامی است' });
+  }
+  // ناظر فقط می‌تونه کاربر عادی بسازه؛ فقط ادمین می‌تونه ناظر/ادمین جدید بسازه (جلوگیری از ترفیع خودسرانه)
+  if (req.user.role === 'moderator' && role !== 'user') {
+    return res.status(403).json({ error: 'فقط ادمین می‌تواند ناظر یا ادمین جدید بسازد' });
   }
   const exists = await User.findOne({ username: username.toLowerCase().trim() });
   if (exists) return res.status(409).json({ error: 'این نام کاربری قبلاً ثبت شده است' });
@@ -219,6 +229,104 @@ router.get('/calls', async (req, res) => {
     .populate('caller', 'username displayName')
     .populate('callee', 'username displayName');
   res.json(calls);
+});
+
+// --- کدهای دعوت (چون ثبت‌نام فقط با دعوته) ---
+router.post('/invites', async (req, res) => {
+  const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+  const invite = await InviteCode.create({ code, createdBy: req.user._id });
+  res.status(201).json(invite);
+});
+
+router.get('/invites', async (req, res) => {
+  const invites = await InviteCode.find().sort({ createdAt: -1 }).limit(100).populate('usedBy', 'displayName username');
+  res.json(invites);
+});
+
+// --- پیام‌های تماسِ قبل از ثبت‌نام ---
+router.get('/contact-requests', async (req, res) => {
+  const items = await ContactRequest.find().sort({ createdAt: -1 }).limit(100);
+  res.json(items);
+});
+
+router.post('/contact-requests/:id/resolve', async (req, res) => {
+  await ContactRequest.findByIdAndUpdate(req.params.id, { resolved: true });
+  res.json({ ok: true });
+});
+
+// --- گزارش‌های کاربران (پیام/کاربر مشکل‌دار) ---
+router.get('/reports', async (req, res) => {
+  const { resolved } = req.query;
+  const filter = resolved !== undefined ? { resolved: resolved === 'true' } : {};
+  const items = await Report.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(150)
+    .populate('reporter', 'displayName username')
+    .populate('targetUser', 'displayName username')
+    .populate('targetMessage');
+  res.json(items);
+});
+
+router.post('/reports/:id/resolve', async (req, res) => {
+  await Report.findByIdAndUpdate(req.params.id, { resolved: true });
+  res.json({ ok: true });
+});
+
+// --- تنظیمات نگهداری پیام روی سرور (فاز ۱ ارتقای امنیت) ---
+// این دو تا API آماده‌ن، فقط UI پنل ادمین بعداً که نمونه‌ش رسید بهش وصل می‌شه.
+router.get('/settings', async (req, res) => {
+  const settings = await getSettings();
+  res.json(settings);
+});
+
+router.put('/settings', async (req, res) => {
+  const { messageRetentionSec, undeliveredMaxWaitSec, adminReportPublicKey } = req.body;
+  const patch = {};
+  if (Number.isFinite(Number(messageRetentionSec)) && Number(messageRetentionSec) > 0) {
+    patch.messageRetentionSec = Number(messageRetentionSec);
+  }
+  if (Number.isFinite(Number(undeliveredMaxWaitSec)) && Number(undeliveredMaxWaitSec) > 0) {
+    patch.undeliveredMaxWaitSec = Number(undeliveredMaxWaitSec);
+  }
+  if (typeof adminReportPublicKey === 'string' && adminReportPublicKey.length > 0) {
+    patch.adminReportPublicKey = adminReportPublicKey;
+  }
+  if (!Object.keys(patch).length) return res.status(400).json({ error: 'مقدار معتبری ارسال نشده' });
+  const settings = await updateSettings(patch);
+  await log(req.user.id, 'update_settings', { note: JSON.stringify(patch) });
+  res.json(settings);
+});
+
+// --- مدل تشخیص محتوا (فاز ۳) - آپلود نسخه‌ی جدید از پنل ادمین (بعداً UI‌اش وصل می‌شه) ---
+router.post('/moderation/model', async (req, res) => {
+  const { modelJson } = req.body;
+  if (!modelJson) return res.status(400).json({ error: 'modelJson ارسال نشده' });
+  try {
+    JSON.parse(typeof modelJson === 'string' ? modelJson : JSON.stringify(modelJson));
+  } catch {
+    return res.status(400).json({ error: 'modelJson معتبر نیست' });
+  }
+  const jsonString = typeof modelJson === 'string' ? modelJson : JSON.stringify(modelJson);
+  const current = await ModerationModel.findOne({ key: 'current' });
+  const nextVersion = (current?.version || 0) + 1;
+  await ModerationModel.findOneAndUpdate(
+    { key: 'current' },
+    { version: nextVersion, modelJson: jsonString },
+    { upsert: true }
+  );
+  await updateSettings({ contentModelVersion: String(nextVersion) });
+  await log(req.user.id, 'update_settings', { note: `moderation model -> v${nextVersion}` });
+  res.json({ ok: true, version: nextVersion });
+});
+
+// --- گزارش‌های رمزشده‌ی خودکار (فاز ۳) - محتوای واقعی فقط با کلید خصوصی ادمین قابل خوندنه؛
+// این‌جا فقط لیستشون می‌کنیم، رمزگشایی سمت ادمین (بعداً که پنل رو فرستادی وصلش می‌کنم) اتفاق میفته ---
+router.get('/reports/encrypted', async (req, res) => {
+  const items = await EncryptedReport.find({})
+    .sort({ createdAt: -1 })
+    .limit(150)
+    .populate('chat', 'type');
+  res.json(items);
 });
 
 module.exports = router;

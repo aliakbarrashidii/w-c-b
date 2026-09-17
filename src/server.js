@@ -25,6 +25,7 @@ const moderationRoutes = require('./routes/moderation');
 const initSocket = require('./socket');
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 

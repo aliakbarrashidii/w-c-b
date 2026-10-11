@@ -13,6 +13,11 @@ const encryptedReportSchema = new mongoose.Schema(
       ciphertext: { type: String, required: true },
     },
     reviewed: { type: Boolean, default: false },
+    // متادیتا (نه محتوا) تا بشه به پرونده‌ی کاربر وصلش کرد؛ فقط وقتی معتبره که عضو همون چت باشه
+    accusedUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    status: { type: String, enum: ['pending', 'under_review', 'confirmed', 'dismissed'], default: 'pending' },
+    decision: { type: mongoose.Schema.Types.Mixed, default: null },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },
   { timestamps: true }
 );

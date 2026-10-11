@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { authenticator } = require('otplib');
@@ -6,6 +7,8 @@ const User = require('../models/User');
 const Session = require('../models/Session');
 const InviteCode = require('../models/InviteCode');
 const ContactRequest = require('../models/ContactRequest');
+const Message = require('../models/Message');
+const { ensureSystemUser, getOrCreateSystemChat } = require('../utils/systemAccount');
 const { requireAuth } = require('../middleware/auth');
 const { normalizeIranPhone } = require('../utils/phone');
 const { hashPhone } = require('../utils/crypto');
@@ -21,13 +24,45 @@ function tempTwoFactorToken(user) {
 }
 
 async function createSession(user, req) {
+  // اگه از قبل نشستِ فعالی داشته، یعنی این ورودِ جدید از یه دستگاه دیگه‌ست - باید هشدار بدیم
+  const hadPriorSession = await Session.exists({ user: user._id, revoked: false });
   const session = await Session.create({
     user: user._id,
     deviceName: req.body.deviceName || 'دستگاه ناشناس',
     userAgent: req.headers['user-agent'] || '',
     ip: req.ip,
   });
+  if (hadPriorSession) {
+    notifyNewLogin(req.app, user._id, session).catch((err) => console.error('[system-account] خطا در اطلاع‌رسانیِ ورود جدید:', err));
+  }
   return session;
+}
+
+// از طرفِ اکانتِ رسمیِ WizChat یه پیام تو چتِ سیستمیِ کاربر می‌ذاره: «این ورود خودتون بودید؟»
+// با دو دکمه (سمت موبایل رندر می‌شه) - یکی «بله» (فقط پیام رو محلی می‌بنده)، یکی «نه» که همون
+// DELETE /api/auth/sessions/:id موجود رو صدا می‌زنه و اون نشست رو حذف می‌کنه.
+async function notifyNewLogin(app, userId, session) {
+  const chat = await getOrCreateSystemChat(userId);
+  const systemUserId = await ensureSystemUser();
+  const message = await Message.create({
+    chat: chat._id,
+    sender: systemUserId,
+    type: 'system_action',
+    // رمز می‌شه تا مثل بقیه‌ی پیام‌ها خونده بشه (متن خام با «:» تو ساعت، موقع رمزگشایی خراب می‌شد)
+    content: require('../utils/crypto').encryptText(`یه ورود جدید به حسابت انجام شد:\n📱 ${session.deviceName}\n🕒 ${new Date(session.createdAt || Date.now()).toLocaleString('fa-IR')}\n\nخودتون بودید؟`),
+    mediaMeta: { action: 'confirm_login', sessionId: session._id },
+  });
+  await message.populate('sender', 'username displayName avatarUrl');
+  chat.lastMessage = message._id;
+  chat.lastActivityAt = new Date();
+  await chat.save();
+  const io = app.get('io');
+  const outMsg = message.toObject();
+  outMsg.content = require('../utils/crypto').decryptText(outMsg.content);
+  io?.to(`chat:${chat._id}`).emit('message:new', outMsg);
+  // اگه این اولین‌باره که چتِ سیستمی براش ساخته شده، سوکتِ زنده‌ش هنوز تو روم این چت نیست -
+  // دقیقاً همون مکانیزمی که برای «عضو تازه به گروه اضافه شد» داریم رو استفاده می‌کنیم تا join کنه
+  io?.to(`user:${userId}`).emit('group:membersChanged', { chatId: chat._id, memberIds: [userId.toString()], addedUserIds: [userId.toString()], reason: 'added' });
 }
 
 // ثبت‌نام مستقیم داخل اپ (بدون نیاز به ادمین) — فقط نام، شماره موبایل و رمز عبور
@@ -97,6 +132,7 @@ router.post('/register', async (req, res) => {
         twoFactorEnabled: user.twoFactorEnabled,
         privacy: user.privacy,
         notificationSettings: user.notificationSettings,
+        appSettings: user.appSettings,
       },
     });
   } catch (err) {
@@ -105,11 +141,25 @@ router.post('/register', async (req, res) => {
 });
 
 // پیام تماس با ادمین قبل از ثبت‌نام (وقتی کد دعوت نداری) — نیازی به لاگین نداره
-router.post('/contact-request', async (req, res) => {
-  const { name, phone, message } = req.body;
-  if (!name?.trim()) return res.status(400).json({ error: 'نام الزامی است' });
-  await ContactRequest.create({ name: name.trim(), phone: phone?.trim() || '', message: message?.trim() || '' });
-  res.status(201).json({ ok: true });
+const requestLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false, message: { error: 'درخواست‌های زیاد؛ بعداً دوباره امتحان کنید' } });
+const requestStatusLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: 'درخواست‌های زیاد؛ بعداً دوباره امتحان کنید' } });
+
+// نام/تلفن/توضیح: سقف طول (قبلاً نامحدود و بدون محدودیت نرخ = اسپم/پر کردن DB توسط هر کسی بدون حساب)
+router.post('/contact-request', requestLimiter, async (req, res) => {
+  const clip = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
+  const name = clip(req.body?.name, 80);
+  if (!name) return res.status(400).json({ error: 'نام الزامی است' });
+  const ticket = require('crypto').randomBytes(12).toString('hex');
+  await ContactRequest.create({ name, phone: clip(req.body?.phone, 30), message: clip(req.body?.message, 500), ticket });
+  res.status(201).json({ ok: true, ticket });
+});
+
+// وضعیت درخواست با «بلیط» (۲۴ هگز تصادفی؛ حدس‌زدنی نیست)
+router.get('/contact-request/status/:ticket', requestStatusLimiter, async (req, res) => {
+  if (!/^[a-f0-9]{24}$/.test(req.params.ticket)) return res.status(404).json({ error: 'پیدا نشد' });
+  const r = await ContactRequest.findOne({ ticket: req.params.ticket }).select('outcome responseNote');
+  if (!r) return res.status(404).json({ error: 'پیدا نشد' });
+  res.json({ outcome: r.outcome, note: r.responseNote });
 });
 
 // ورود با نام‌کاربری/رمز عبور (کاربرها فعلاً دستی توسط ادمین ساخته می‌شوند)
@@ -124,6 +174,7 @@ router.post('/login', async (req, res) => {
       ? await User.findOne({ phoneHash: hashPhone(asPhone) })
       : await User.findOne({ username: username.toLowerCase().trim() });
     if (!user) return res.status(401).json({ error: 'نام کاربری یا رمز عبور اشتباه است' });
+    if (user.status === 'deleted') return res.status(401).json({ error: 'این حساب حذف شده است' });
     if (user.status === 'banned') return res.status(403).json({ error: 'حساب شما مسدود شده است' });
 
     const valid = await bcrypt.compare(password, user.passwordHash);
@@ -152,6 +203,7 @@ router.post('/login', async (req, res) => {
         twoFactorEnabled: user.twoFactorEnabled,
         privacy: user.privacy,
         notificationSettings: user.notificationSettings,
+        appSettings: user.appSettings,
       },
     });
   } catch (err) {
@@ -198,6 +250,7 @@ router.post('/login/2fa', async (req, res) => {
         twoFactorEnabled: user.twoFactorEnabled,
         privacy: user.privacy,
         notificationSettings: user.notificationSettings,
+        appSettings: user.appSettings,
       },
     });
   } catch (err) {
@@ -219,6 +272,7 @@ router.get('/me', requireAuth, async (req, res) => {
     twoFactorEnabled: u.twoFactorEnabled,
     privacy: u.privacy,
     notificationSettings: u.notificationSettings,
+    appSettings: u.appSettings,
     defaultWallpaper: u.defaultWallpaper,
     avatarUrls: u.avatarUrls,
     coverId: u.coverId,
@@ -226,6 +280,7 @@ router.get('/me', requireAuth, async (req, res) => {
 });
 
 router.patch('/me', requireAuth, async (req, res) => {
+  { const blocked = await require('../utils/restrictions').guard(req.user, 'profile_edit'); if (blocked) return res.status(403).json({ error: blocked }); }
   const { displayName, bio, avatarUrl, theme, defaultWallpaper, coverId } = req.body;
   if (displayName !== undefined) req.user.displayName = displayName;
   if (bio !== undefined) req.user.bio = bio;
@@ -266,6 +321,26 @@ router.patch('/me/privacy', requireAuth, async (req, res) => {
   res.json({ ok: true, privacy: req.user.privacy });
 });
 
+// همگام‌سازی تنظیمات اپ بین دستگاه‌ها (تم و پیش‌نمایش لینک) - فقط مقدارهای معتبر ذخیره می‌شن
+router.patch('/me/app-settings', requireAuth, async (req, res) => {
+  const { themeId, linkPreviews, quickReplies } = req.body || {};
+  if (themeId !== undefined) {
+    if (typeof themeId !== 'string' || !/^[a-z0-9_-]{1,30}$/i.test(themeId)) return res.status(400).json({ error: 'تم نامعتبر است' });
+    req.user.appSettings.themeId = themeId;
+  }
+  if (linkPreviews !== undefined) {
+    if (typeof linkPreviews !== 'boolean') return res.status(400).json({ error: 'مقدار نامعتبر است' });
+    req.user.appSettings.linkPreviews = linkPreviews;
+  }
+  if (quickReplies !== undefined) {
+    const clean = require('../utils/quickReplies').sanitizeQuickReplies(quickReplies);
+    if (!clean) return res.status(400).json({ error: 'پاسخ‌های سریع نامعتبر است' });
+    req.user.appSettings.quickReplies = clean;
+  }
+  await req.user.save();
+  res.json({ ok: true, appSettings: req.user.appSettings });
+});
+
 router.patch('/me/notifications', requireAuth, async (req, res) => {
   const { enabled, sound, preview } = req.body;
   if (enabled !== undefined) req.user.notificationSettings.enabled = enabled;
@@ -304,6 +379,22 @@ router.post('/sessions/revoke-all-others', requireAuth, async (req, res) => {
     { user: req.user._id, _id: { $ne: req.sessionId } },
     { revoked: true }
   );
+  res.json({ ok: true });
+});
+
+
+// حذف حساب توسط خود کاربر (قابل برگشت نیست). رمز عبور الزامیه و اگه ورود دومرحله‌ای فعاله، کد هم لازمه.
+// مدیر (admin) نمی‌تونه حساب خودش رو پاک کنه تا سیستم بی‌ادمین نشه. پاک‌سازی: utils/dataCleanup.js → purgeUserAccount
+router.delete('/me', requireAuth, async (req, res) => {
+  const { password, code } = req.body || {};
+  if (req.user.role === 'admin') return res.status(403).json({ error: 'حساب مدیر را نمی‌توان از اینجا حذف کرد' });
+  const valid = await bcrypt.compare(password || '', req.user.passwordHash);
+  if (!valid) return res.status(401).json({ error: 'رمز عبور اشتباه است' });
+  if (req.user.twoFactorEnabled) {
+    if (!code) return res.status(400).json({ error: 'کد ورود دومرحله‌ای لازم است', needs2fa: true });
+    if (!authenticator.verify({ token: String(code), secret: req.user.twoFactorSecret })) return res.status(401).json({ error: 'کد نامعتبر است' });
+  }
+  await require('../utils/dataCleanup').purgeUserAccount(req.user._id, req.app.get('io'));
   res.json({ ok: true });
 });
 
@@ -362,5 +453,16 @@ router.patch('/me/username', requireAuth, async (req, res) => {
   await req.user.save();
   res.json({ ok: true, username: clean });
 });
+
+// برای ورود با تلگرام (routes/telegramAuth.js) - همون ساخت نشست و توکنِ ورودِ عادی
+router.helpers = {
+  createSession,
+  signToken,
+  userPayload: (user) => ({
+    id: user._id, username: user.username, displayName: user.displayName, avatarUrl: user.avatarUrl, bio: user.bio, role: user.role,
+    theme: user.theme, twoFactorEnabled: user.twoFactorEnabled, privacy: user.privacy, notificationSettings: user.notificationSettings,
+        appSettings: user.appSettings,
+  }),
+};
 
 module.exports = router;

@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('./utils/asyncErrors'); // قبل از ثبت مسیرها: خطای هندلرهای async به میدل‌ویر خطا برسه، نه کل پروسه رو بکشه
 const dns = require('dns');
 const path = require('path');
 const express = require('express');
@@ -22,16 +23,34 @@ const reportRoutes = require('./routes/reports');
 const adminRoutes = require('./routes/admin');
 const deviceRoutes = require('./routes/devices');
 const moderationRoutes = require('./routes/moderation');
+const groupRoutes = require('./routes/groups');
 const initSocket = require('./socket');
 
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
+app.set('io', io);
 
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
+
+// برای پیام‌های زمان‌دار: گوشی این رو صدا می‌زنه تا اختلاف ساعتش با سرور رو بفهمه، چون سررسیدِ
+// واقعیِ پیام رو خودِ سرور (نه گوشیِ فرستنده) تشخیص می‌ده - نیازی به احراز هویت نداره
+app.get('/api/time', (req, res) => {
+  res.json({ serverTime: new Date().toISOString() });
+});
+
+// عمومی (بدون نیاز به لاگین) - کلاینت قبل از هر کار دیگه‌ای اینو چک می‌کنه: اگه حالت تعمیره
+// صفحه‌ی بلوکه رو نشون می‌ده؛ محدودیت حجم آپلود رو هم همینجا می‌گیره
+app.get('/api/settings/public', async (req, res) => {
+  const { getSettings } = require('./utils/settings');
+  const settings = await getSettings();
+  const { getPolicy } = require('./utils/moderationPolicy');
+  const policy = await getPolicy();
+  res.json({ maintenanceMode: settings.maintenanceMode, maxUploadSizeMb: settings.maxUploadSizeMb, telegramLoginEnabled: settings.telegramLoginEnabled !== false && !!process.env.TELEGRAM_BOT_TOKEN, aiScopes: policy.scopes });
+});
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -41,7 +60,20 @@ app.use(
 );
 
 app.get('/health', (req, res) => res.json({ ok: true }));
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// فایل‌های آپلودی: بدون لیست‌کردن پوشه (express.static ایندکس نمی‌ده) و با هدرهای ضد‌اجرا - حتی اگه فایلِ HTML/SVG قدیمی‌ای
+// (قبل از پاک‌سازی پسوند) تو پوشه باشه، مرورگر اجراش نمی‌کنه: CSP sandbox + nosniff + دانلود اجباری برای نوع‌های غیررسانه‌ای.
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads'), {
+  index: false,
+  dotfiles: 'deny',
+  setHeaders: (res, filePath) => {
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    if (!/\.(jpe?g|png|gif|webp|heic|mp4|mov|webm|m4a|mp3|aac|ogg|opus|wav|3gp)$/i.test(filePath)) {
+      res.setHeader('Content-Disposition', 'attachment');
+    }
+  },
+}));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/chats', chatRoutes);
@@ -56,9 +88,19 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/moderation', moderationRoutes);
+app.use('/api/groups', groupRoutes);
+app.use('/api/stickers', require('./routes/stickers').userRouter);
+app.use('/api/bots', require('./routes/bots'));
+app.use('/bot-api', require('./routes/botApi'));
+app.use('/api/auth/telegram', require('./routes/telegramAuth'));
 app.use('/wallpapers', express.static(path.join(__dirname, '..', 'wallpapers')));
 
 app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  // ورودی نامعتبر (ObjectId خراب، اعتبارسنجی مدل، JSON خراب، بدنه‌ی خیلی بزرگ) = خطای کلاینت، نه ۵۰۰
+  if (err.name === 'CastError' || err.name === 'ValidationError') return res.status(400).json({ error: 'مقدار ورودی نامعتبر است' });
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'بدنه‌ی درخواست نامعتبر است' });
+  if (err.type === 'entity.too.large') return res.status(413).json({ error: 'حجم درخواست زیاد است' });
   console.error(err);
   res.status(500).json({ error: 'خطای داخلی سرور' });
 });

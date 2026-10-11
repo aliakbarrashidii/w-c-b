@@ -15,7 +15,7 @@ router.get('/', requireAuth, async (req, res) => {
 
   const myChats = await Chat.find({ 'members.user': req.user._id }).populate(
     'members.user',
-    'username displayName avatarUrl'
+    'username displayName avatarUrl isBot'
   );
 
   const lowerNeedle = needle.toLowerCase();
@@ -29,11 +29,18 @@ router.get('/', requireAuth, async (req, res) => {
     .slice(0, 15);
 
   // جستجوی محتوای پیام‌ها فقط داخل چت‌های خودم (پیام‌ها رمزنگاری‌شده‌اند، پس رمزگشایی+فیلتر در اپ)
-  const myChatIds = myChats.map((c) => c._id);
+  // چت‌های مخفی (E2E) سمت سرور فقط متن رمزشده دارن، پس قابل جستجو نیستن؛ و پیام‌های قبل از «پاک کردن تاریخچه»ی خودِ کاربر هم نباید برگردن
+  const searchable = myChats.filter((c) => c.type !== 'secret');
+  const clearedAt = new Map();
+  for (const c of searchable) {
+    const me = c.members.find((m) => m.user._id.toString() === req.user._id.toString());
+    if (me?.clearedAt) clearedAt.set(c._id.toString(), new Date(me.clearedAt));
+  }
+  const myChatIds = searchable.map((c) => c._id);
   const recentMessages = await Message.find({ chat: { $in: myChatIds }, deletedForEveryone: { $ne: true } })
     .sort({ createdAt: -1 })
     .limit(300)
-    .populate('sender', 'username displayName avatarUrl')
+    .populate('sender', 'username displayName avatarUrl isBot')
     .populate('chat', 'type title members');
 
   const matchedMessages = recentMessages
@@ -42,6 +49,7 @@ router.get('/', requireAuth, async (req, res) => {
       obj.content = decryptText(obj.content);
       return obj;
     })
+    .filter((m) => !(clearedAt.get(String(m.chat?._id)) > new Date(m.createdAt)))
     .filter((m) => m.content?.toLowerCase().includes(lowerNeedle))
     .slice(0, 20);
 

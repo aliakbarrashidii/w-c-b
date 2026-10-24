@@ -23,6 +23,8 @@ const botSchema = new mongoose.Schema(
       temperature: { type: Number, default: 0.7 },
       maxHistory: { type: Number, default: 10 },
     },
+    // حالت inline (`@bot متن` در نوار ورودیِ هر چت): فقط ربات‌های commands (نتیجه از دستورها) و webhook (answerInlineQuery)
+    inline: { enabled: { type: Boolean, default: false }, placeholder: { type: String, default: '', maxlength: 60 } },
     nextUpdateId: { type: Number, default: 1 },
     stats: { messages: { type: Number, default: 0 }, lastActiveAt: Date },
   },

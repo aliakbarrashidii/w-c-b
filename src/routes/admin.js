@@ -395,7 +395,7 @@ router.put('/settings', requireRole('admin'), async (req, res) => { // فقط ا
     patch.adminReportPublicKey = adminReportPublicKey;
   }
   if (mediaRetentionSec && typeof mediaRetentionSec === 'object') {
-    const allowed = ['image', 'video', 'voice', 'video_note', 'file'];
+    const allowed = ['image', 'video', 'voice', 'video_note', 'file', 'audio'];
     const clean = {};
     for (const key of allowed) {
       const v = mediaRetentionSec[key];

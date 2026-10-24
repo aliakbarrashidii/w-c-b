@@ -33,6 +33,8 @@ const chatSchema = new mongoose.Schema(
     isArchivedByAdmin: { type: Boolean, default: false },
     // حالت آهسته (گروه): حداقل فاصله‌ی ثانیه‌ای بین دو پیام یک عضو عادی؛ ۰ = خاموش. ادمین/مالک مستثنی‌اند
     slowModeSec: { type: Number, default: 0 },
+    // «محدودکردن ذخیره و فوروارد» (مثل تلگرام): فقط مالکِ گروه/کانال روشن می‌کند؛ فوروارد را سرور رد می‌کند، کپی/ذخیره/اسکرین‌شات را کلاینت می‌بندد
+    protectedContent: { type: Boolean, default: false },
     // تاپیک‌های گروه (دسته‌بندی پیام‌ها؛ حداکثر ۲۰) - utils/topics.js
     topics: [{ title: { type: String, maxlength: 30 }, emoji: { type: String, default: '', maxlength: 8 }, createdAt: { type: Date, default: Date.now } }],
     allowMemberTags: { type: Boolean, default: false }, // اعضا می‌تونن برچسب «خودشون» رو تعیین کنن (پیش‌فرض: فقط ادمین)
@@ -46,14 +48,18 @@ const chatSchema = new mongoose.Schema(
     joinApproval: { type: Boolean, default: false },
     joinRequests: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, at: { type: Date, default: Date.now }, _id: false }],
     // لینک دعوت (فقط گروه/کانال): هر کسی با کد می‌تونه عضو بشه تا ادمین کد رو بازنشانی کنه
-    inviteCode: { type: String, default: null, index: { unique: true, sparse: true } },
+    // بدون default و با ایندکس partial: مقدار null هم تو ایندکس unique+sparse ثبت می‌شد و تو دیتابیسِ تازه فقط «یک» چت اجازه‌ی وجود داشت
+    // (ساخت چت دوم E11000 می‌داد). روی DB موجود: node scripts/migrate-user-indexes.js
+    inviteCode: { type: String },
     // نام کاربری عمومی: گروه/کانالِ قابل‌جستجو و ورود مستقیم (فقط وقتی مالک بخواد)
-    publicUsername: { type: String, default: null, lowercase: true, index: { unique: true, sparse: true } },
+    publicUsername: { type: String, lowercase: true },
   },
   { timestamps: true }
 );
 
 chatSchema.index({ 'members.user': 1 });
+chatSchema.index({ inviteCode: 1 }, { unique: true, partialFilterExpression: { inviteCode: { $type: 'string' } } });
+chatSchema.index({ publicUsername: 1 }, { unique: true, partialFilterExpression: { publicUsername: { $type: 'string' } } });
 chatSchema.index({ title: 'text' });
 
 module.exports = mongoose.model('Chat', chatSchema);

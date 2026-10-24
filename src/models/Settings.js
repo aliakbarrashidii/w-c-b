@@ -17,6 +17,7 @@ const settingsSchema = new mongoose.Schema(
       voice: { type: Number, default: null },
       video_note: { type: Number, default: null },
       file: { type: Number, default: null },
+      audio: { type: Number, default: null }, // موسیقی/فایل صوتی (جدا از «ویس»)
     },
     // مدل تشخیص محتوا (فاز بعدی) نسخه‌ش رو اینجا نگه می‌داره تا ادمین بتونه بروزرسانی کنه
     contentModelVersion: { type: String, default: '' },

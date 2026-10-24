@@ -66,10 +66,9 @@ async function unlinkIfUnreferenced(urls) {
 async function unpinMessages(messageIds) {
   const ids = (Array.isArray(messageIds) ? messageIds : [messageIds]).filter(Boolean);
   if (!ids.length) return;
-  await Promise.all([
-    Chat.updateMany({ pinnedMessage: { $in: ids } }, { pinnedMessage: null }),
-    Chat.updateMany({ pinnedMessages: { $in: ids } }, { $pull: { pinnedMessages: { $in: ids } } }),
-  ]);
+  // ترتیبی (نه Promise.all): هر دو یک سند رو تغییر می‌دن؛ موازی‌بودن روی بعضی موتورها = lost update
+  await Chat.updateMany({ pinnedMessage: { $in: ids } }, { pinnedMessage: null });
+  await Chat.updateMany({ pinnedMessages: { $in: ids } }, { $pull: { pinnedMessages: { $in: ids } } });
 }
 
 // حذف کامل چت‌ها + همه‌ی وابسته‌هاشون (پیام‌ها، لاگ ادمین، زمان‌بندی‌شده‌ها، کلیدهای گروه، اکتیویتی، حافظه‌ی ربات، پوشه‌ها، فایل‌ها)

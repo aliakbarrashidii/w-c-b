@@ -8,6 +8,7 @@ const BotUpdate = require('../models/BotUpdate');
 const { encryptText, decryptText } = require('./crypto');
 const { getSettings } = require('./settings');
 const { sendPushNotifications } = require('./push');
+const inlineCore = require('./inlineCore');
 
 const DEFAULT_POLICY = { allowUserBots: true, maxBotsPerUser: 5, agentEnabled: true, agentRatePerMinPerUser: 6, agentDailyPerBot: 500, allowHttpEndpoints: false };
 async function getBotPolicy() {
@@ -70,7 +71,7 @@ async function postBotMessage(io, bot, chatId, { text, buttons, replyTo, media }
     const botUser = await User.findById(bot.user).select('displayName');
     for (const u of users) {
       const st = u.notificationSettings || {};
-      if (st.enabled === false) continue;
+      if (!require('./pushPolicy').shouldPush(st, 'message')) continue;
       sendPushNotifications(u.pushTokens, { title: botUser?.displayName || 'Bot', body: st.preview === false ? 'پیام جدید' : (clean.slice(0, 120) || { image: '📷', file: '📎', voice: '🎤' }[media?.type] || ''), sound: st.sound === false ? null : 'default', data: { chatId: String(chatId), type: 'message' } });
     }
   } catch {}
@@ -170,6 +171,38 @@ async function onCallback(io, { chat, botMsg, fromUser, data }) {
   });
 }
 
+// ---- inline: `@bot متن` ----
+// پرس‌وجوی inline فقط تو حافظه و چند ثانیه: ربات webhook با answerInlineQuery جواب می‌دهد؛ ربات commands از دستورهایش نتیجه می‌سازد.
+const INLINE_WAIT_MS = 5000;
+const pendingInline = new Map();
+function waitForInlineAnswer(id, userId, botId, ms = INLINE_WAIT_MS) {
+  return new Promise((resolve) => {
+    const now = Date.now();
+    for (const [k, v] of pendingInline) if (v.expires < now) pendingInline.delete(k);
+    const timer = setTimeout(() => { pendingInline.delete(id); resolve(null); }, ms);
+    pendingInline.set(id, { userId: String(userId), botId: String(botId), expires: now + ms + 1000, resolve: (r) => { clearTimeout(timer); resolve(r); } });
+  });
+}
+// جواب ربات؛ فقط یک‌بار و فقط از همان رباتی که پرس‌وجو به او رفت. false = نامعتبر/منقضی
+function answerInline(id, botId, rawResults) {
+  const v = pendingInline.get(String(id));
+  if (!v || v.botId !== String(botId)) return false;
+  pendingInline.delete(String(id));
+  v.resolve(inlineCore.normalizeResults(rawResults));
+  return true;
+}
+async function runInlineQuery(io, bot, fromUser, query, chat) {
+  if (bot.type === 'commands') return { results: inlineCore.commandResults(bot.commands, query) };
+  if (bot.type === 'webhook') {
+    const id = crypto.randomBytes(8).toString('hex');
+    const answer = waitForInlineAnswer(id, fromUser._id, bot._id);
+    await dispatchUpdate(io, bot, { inline_query: { id, from: userInfo(fromUser), query, chat_type: chat?.type || 'private' } });
+    const results = await answer;
+    return results ? { results } : { results: [], timeout: true };
+  }
+  return { results: [], unsupported: true };
+}
+
 // ---- ربات بدون‌کد: دستور => پاسخ + دکمه ----
 async function handleCommandsBot(io, bot, upd) {
   const chatId = (upd.message || upd.callback_query?.message)?.chat.id;
@@ -262,4 +295,4 @@ async function handleAgentBot(io, bot, upd) {
   }
 }
 
-module.exports = { getBotPolicy, hashToken, newToken, isSafeUrl, humanIds, postBotMessage, editBotMessage, dispatchUpdate, onUserMessage, onCallback, DEFAULT_POLICY, takeCallback };
+module.exports = { getBotPolicy, hashToken, newToken, isSafeUrl, humanIds, postBotMessage, editBotMessage, dispatchUpdate, onUserMessage, onCallback, DEFAULT_POLICY, takeCallback, answerInline, runInlineQuery };

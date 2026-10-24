@@ -16,7 +16,7 @@ const FEATURES = {
   file_reports: 'ثبت گزارش',
 };
 
-const MEDIA_FEATURE = { image: 'send_media', video: 'send_media', file: 'send_media', voice: 'voice', video_note: 'voice', sticker: 'stickers', text: 'send_messages', poll: 'send_messages', location: 'send_messages', contact: 'send_messages' };
+const MEDIA_FEATURE = { image: 'send_media', video: 'send_media', file: 'send_media', audio: 'send_media', voice: 'voice', video_note: 'voice', sticker: 'stickers', text: 'send_messages', poll: 'send_messages', location: 'send_messages', contact: 'send_messages', checklist: 'send_messages' };
 
 function activeRestrictions(user) {
   const now = Date.now();

@@ -8,6 +8,7 @@ const { requireAuth } = require('../middleware/auth');
 const { encryptText } = require('../utils/crypto');
 const engine = require('../utils/botEngine');
 const { normalizeButtons } = require('./botApi');
+const inlineCore = require('../utils/inlineCore');
 
 // مدیریت ربات‌ها توسط صاحبشون (شبیه BotFather): ساخت، ویرایش، توکن، حذف
 const router = express.Router();
@@ -17,6 +18,7 @@ const publicBot = (b, u) => ({
   id: b._id, userId: String(b.user), username: u?.username, name: u?.displayName, avatarUrl: u?.avatarUrl, type: b.type, description: b.description, active: b.active,
   disabledByAdmin: b.disabledByAdmin, commands: b.commands, defaultReply: b.defaultReply, webhookUrl: b.webhookUrl, hasWebhookSecret: !!b.webhookSecret,
   agent: { baseUrl: b.agent?.baseUrl || '', model: b.agent?.model || '', systemPrompt: b.agent?.systemPrompt || '', temperature: b.agent?.temperature ?? 0.7, maxHistory: b.agent?.maxHistory ?? 10, hasKey: !!b.agent?.apiKeyEnc },
+  inline: { enabled: !!b.inline?.enabled, placeholder: b.inline?.placeholder || '' },
   stats: b.stats,
 });
 
@@ -66,6 +68,10 @@ router.patch('/:id', async (req, res) => {
   if (typeof b.description === 'string') { bot.description = b.description.slice(0, 300); userPatch.bio = bot.description; }
   if (typeof b.active === 'boolean') bot.active = b.active;
   if (b.type && ['commands', 'webhook', 'agent'].includes(b.type)) bot.type = b.type;
+  if (b.inline && typeof b.inline === 'object') {
+    if (typeof b.inline.enabled === 'boolean') bot.inline.enabled = b.inline.enabled;
+    if (typeof b.inline.placeholder === 'string') bot.inline.placeholder = inlineCore.sanitizePlaceholder(b.inline.placeholder);
+  }
   if (typeof b.defaultReply === 'string') bot.defaultReply = b.defaultReply.slice(0, 2000);
   if (Array.isArray(b.commands)) {
     bot.commands = b.commands.slice(0, 50).map((c) => ({
@@ -112,6 +118,27 @@ router.delete('/:id', async (req, res) => {
   // حذف کامل: ربات، حساب ربات، حافظه‌ی AI، صف آپدیت‌ها، و چت‌های خصوصی کاربران با این ربات (utils/dataCleanup.js)
   await require('../utils/dataCleanup').purgeBot(bot);
   res.json({ ok: true });
+});
+
+// پرس‌وجوی inline: `@bot متن` در نوار ورودی. متنِ query به «صاحبِ ربات» می‌رسد (مثل تلگرام)، پس کلاینت باید نام ربات را در پنل نشان بدهد.
+const inlineRate = new Map();
+router.post('/inline-query', async (req, res) => {
+  const username = inlineCore.parseBotUsername(req.body?.username);
+  const query = inlineCore.parseQuery(req.body?.query ?? '');
+  if (!username || query === null) return res.status(400).json({ error: 'درخواست نامعتبر' });
+  // فقط از داخل یک چتی که کاربر عضوش است (برای chat_type و جلوگیری از سوءاستفاده‌ی بی‌هدف)
+  const chat = await Chat.findById(req.body?.chatId).select('type members').catch(() => null);
+  if (!chat || !chat.members.some((m) => m.user.toString() === req.user._id.toString())) return res.status(403).json({ error: 'عضو نیستی' });
+  const rk = String(req.user._id);
+  const rate = inlineCore.rateCheck(inlineRate.get(rk));
+  inlineRate.set(rk, rate.stamps);
+  if (inlineRate.size > 5000) for (const [k, v] of inlineRate) if (!v.some((t) => Date.now() - t < 60000)) inlineRate.delete(k);
+  if (!rate.ok) return res.status(429).json({ error: 'کمی آهسته‌تر' });
+  const user = await User.findOne({ username, isBot: true }).select('username displayName');
+  const bot = user && (await Bot.findOne({ user: user._id, active: true, disabledByAdmin: false }));
+  if (!bot || !bot.inline?.enabled) return res.status(404).json({ error: 'این ربات حالت inline ندارد' });
+  const out = await engine.runInlineQuery(req.app.get('io'), bot, req.user, query, chat);
+  res.json({ ...out, bot: { userId: String(user._id), username: user.username, name: user.displayName }, placeholder: bot.inline.placeholder || '' });
 });
 
 // دستورهای ربات‌های عضوِ یه چت (برای پیشنهاد خودکار وقتی کاربر «/» می‌زنه)

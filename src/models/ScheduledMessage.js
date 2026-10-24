@@ -16,6 +16,7 @@ const scheduledMessageSchema = new mongoose.Schema(
     mediaUrl: { type: String, default: '' },
     mediaMeta: { type: mongoose.Schema.Types.Mixed, default: {} },
     replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
+    replyQuote: { start: { type: Number, default: undefined }, end: { type: Number, default: undefined } },
     scheduledFor: { type: Date, required: true, index: true },
     status: { type: String, enum: ['pending', 'sent', 'cancelled', 'failed'], default: 'pending' },
   },

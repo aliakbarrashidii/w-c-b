@@ -17,5 +17,14 @@ const mongoose = require('mongoose');
     await users.createIndex({ [field]: 1 }, { unique: true, partialFilterExpression: { [field]: { $type: 'string' } } });
     console.log(`ایندکس partial ${field} ساخته شد`);
   }
+  // چت‌ها: inviteCode / publicUsername (همان مشکلِ null در ایندکس unique+sparse؛ فقط یک چت می‌توانست وجود داشته باشد)
+  const chats = mongoose.connection.collection('chats');
+  for (const field of ['inviteCode', 'publicUsername']) {
+    const r = await chats.updateMany({ [field]: null }, { $unset: { [field]: '' } });
+    console.log(`chats.${field}: ${r.modifiedCount} مقدار null حذف شد`);
+    try { await chats.dropIndex(`${field}_1`); console.log(`ایندکس قدیمی chats.${field}_1 حذف شد`); } catch (e) { console.log(`ایندکس chats.${field}_1: ${e.codeName || e.message}`); }
+    await chats.createIndex({ [field]: 1 }, { unique: true, partialFilterExpression: { [field]: { $type: 'string' } } });
+    console.log(`ایندکس partial chats.${field} ساخته شد`);
+  }
   await mongoose.disconnect();
 })().catch((e) => { console.error(e); process.exit(1); });

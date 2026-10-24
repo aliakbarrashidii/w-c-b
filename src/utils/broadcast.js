@@ -76,7 +76,7 @@ async function runBroadcast(app, broadcastId) {
         try {
           const chat = await sendToUser(app, systemUserId, u, b.text, mediaMeta);
           delivered++;
-          if (u.notificationSettings?.enabled !== false && u.pushTokens?.length) {
+          if (require('./pushPolicy').shouldPush(u.notificationSettings, 'message') && u.pushTokens?.length) {
             sendPushNotifications(u.pushTokens, { title: 'WizChat', body: u.notificationSettings?.preview === false ? 'پیام جدید' : b.text.slice(0, 120), data: { chatId: String(chat._id), type: 'message', recipientId: String(u._id) } }).catch(() => {});
           }
         } catch (err) {

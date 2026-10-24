@@ -5,13 +5,15 @@ const jwt = require('jsonwebtoken');
 const { authenticator } = require('otplib');
 const User = require('../models/User');
 const Session = require('../models/Session');
+const { sanitizeDeviceInfo, computeRestrictedUntil, isRestricted, canConfirm } = require('../utils/sessionPolicy');
 const InviteCode = require('../models/InviteCode');
 const ContactRequest = require('../models/ContactRequest');
 const Message = require('../models/Message');
 const { ensureSystemUser, getOrCreateSystemChat } = require('../utils/systemAccount');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireTrustedSession } = require('../middleware/auth');
 const { normalizeIranPhone } = require('../utils/phone');
 const { hashPhone } = require('../utils/crypto');
+const loginAlert = require('../utils/loginAlert');
 
 const router = express.Router();
 
@@ -24,16 +26,32 @@ function tempTwoFactorToken(user) {
 }
 
 async function createSession(user, req) {
-  // اگه از قبل نشستِ فعالی داشته، یعنی این ورودِ جدید از یه دستگاه دیگه‌ست - باید هشدار بدیم
+  const info = sanitizeDeviceInfo(req.body || {});
+  const now = Date.now();
+  // «ورودِ دستگاه ناشناسِ تازه»: حساب قبلاً نشستِ فعال داشته و این دستگاه (deviceId) قبلاً معتبر نبوده
   const hadPriorSession = await Session.exists({ user: user._id, revoked: false });
+  const knownDevice = info.deviceId
+    ? await Session.exists({
+        user: user._id,
+        deviceId: info.deviceId,
+        $or: [{ restrictedUntil: null }, { restrictedUntil: { $lte: new Date(now) } }, { confirmedAt: { $ne: null } }],
+      })
+    : false;
+  const restrictedUntil = computeRestrictedUntil({ hadPriorSession: !!hadPriorSession, knownDevice: !!knownDevice, now });
+  // همان دستگاهِ هنوز-تأییدنشده اگر در ۲۴ ساعت گذشته نشستِ فعال داشته، قبلاً پوش گرفته؛ پوشِ تکراری نمی‌فرستیم (نشستِ باطل‌شده با «نه، من نبودم» حساب نمی‌شود: ورودِ دوباره‌اش دوباره هشدار می‌دهد)
+  const recentSameDevice = info.deviceId
+    ? await Session.exists({ user: user._id, deviceId: info.deviceId, revoked: false, createdAt: { $gte: new Date(now - 24 * 3600 * 1000) } })
+    : false;
   const session = await Session.create({
     user: user._id,
-    deviceName: req.body.deviceName || 'دستگاه ناشناس',
+    ...info,
     userAgent: req.headers['user-agent'] || '',
     ip: req.ip,
+    restrictedUntil,
   });
-  if (hadPriorSession) {
-    notifyNewLogin(req.app, user._id, session).catch((err) => console.error('[system-account] خطا در اطلاع‌رسانیِ ورود جدید:', err));
+  // فقط برای دستگاه ناشناسِ تازه هشدار می‌دهیم (ورود مجدد از دستگاه شناخته‌شده هشدار الکی نمی‌دهد)
+  if (restrictedUntil) {
+    notifyNewLogin(req.app, user._id, session, { push: !recentSameDevice }).catch((err) => console.error('[system-account] خطا در اطلاع‌رسانیِ ورود جدید:', err));
   }
   return session;
 }
@@ -41,7 +59,7 @@ async function createSession(user, req) {
 // از طرفِ اکانتِ رسمیِ WizChat یه پیام تو چتِ سیستمیِ کاربر می‌ذاره: «این ورود خودتون بودید؟»
 // با دو دکمه (سمت موبایل رندر می‌شه) - یکی «بله» (فقط پیام رو محلی می‌بنده)، یکی «نه» که همون
 // DELETE /api/auth/sessions/:id موجود رو صدا می‌زنه و اون نشست رو حذف می‌کنه.
-async function notifyNewLogin(app, userId, session) {
+async function notifyNewLogin(app, userId, session, { push = true } = {}) {
   const chat = await getOrCreateSystemChat(userId);
   const systemUserId = await ensureSystemUser();
   const message = await Message.create({
@@ -49,8 +67,8 @@ async function notifyNewLogin(app, userId, session) {
     sender: systemUserId,
     type: 'system_action',
     // رمز می‌شه تا مثل بقیه‌ی پیام‌ها خونده بشه (متن خام با «:» تو ساعت، موقع رمزگشایی خراب می‌شد)
-    content: require('../utils/crypto').encryptText(`یه ورود جدید به حسابت انجام شد:\n📱 ${session.deviceName}\n🕒 ${new Date(session.createdAt || Date.now()).toLocaleString('fa-IR')}\n\nخودتون بودید؟`),
-    mediaMeta: { action: 'confirm_login', sessionId: session._id },
+    content: require('../utils/crypto').encryptText(`یه ورود جدید به حسابت انجام شد:\n📱 ${session.deviceName || 'دستگاه ناشناس'}\n🕒 ${new Date(session.createdAt || Date.now()).toLocaleString('fa-IR')}\n\nخودتون بودید؟`),
+    mediaMeta: { action: 'confirm_login', sessionId: session._id, deviceName: session.deviceName, platform: session.platform, createdAt: session.createdAt },
   });
   await message.populate('sender', 'username displayName avatarUrl');
   chat.lastMessage = message._id;
@@ -63,6 +81,17 @@ async function notifyNewLogin(app, userId, session) {
   // اگه این اولین‌باره که چتِ سیستمی براش ساخته شده، سوکتِ زنده‌ش هنوز تو روم این چت نیست -
   // دقیقاً همون مکانیزمی که برای «عضو تازه به گروه اضافه شد» داریم رو استفاده می‌کنیم تا join کنه
   io?.to(`user:${userId}`).emit('group:membersChanged', { chatId: chat._id, memberIds: [userId.toString()], addedUserIds: [userId.toString()], reason: 'added' });
+
+  // پوش به دستگاه‌های قبلی (توکن‌های پوشِ حساب؛ دستگاهِ تازه هنوز توکنش را ثبت نکرده). خطا نباید ورود را خراب کند.
+  try {
+    const u = await User.findById(userId).select('pushTokens').lean();
+    const tokens = loginAlert.pickTokens(u);
+    if (push && tokens.length) {
+      const payload = loginAlert.newLoginPushPayload({ session, chatId: chat._id, messageId: message._id, userId });
+      // دسترسی از روی شیء ماژول در لحظه‌ی فراخوانی (قابل جایگزینی در تست)
+      require('../utils/push').sendPushNotifications(tokens, payload).catch((err) => console.error('[login-alert] push:', err.message));
+    }
+  } catch (err) { console.error('[login-alert]', err.message); }
 }
 
 // ثبت‌نام مستقیم داخل اپ (بدون نیاز به ادمین) — فقط نام، شماره موبایل و رمز عبور
@@ -312,7 +341,11 @@ router.delete('/me/avatars', requireAuth, async (req, res) => {
 });
 
 router.patch('/me/privacy', requireAuth, async (req, res) => {
-  const { lastSeenVisibility, readReceiptsEnabled, lastSeenExceptions } = req.body;
+  const { lastSeenVisibility, readReceiptsEnabled, lastSeenExceptions, groupAdd } = req.body;
+  if (groupAdd !== undefined) {
+    if (!require('../utils/groupAddPolicy').MODES.includes(groupAdd)) return res.status(400).json({ error: 'مقدار نامعتبر', field: 'groupAdd' });
+    req.user.privacy.groupAdd = groupAdd;
+  }
   if (lastSeenVisibility !== undefined) req.user.privacy.lastSeenVisibility = lastSeenVisibility;
   if (readReceiptsEnabled !== undefined) req.user.privacy.readReceiptsEnabled = readReceiptsEnabled;
   if (lastSeenExceptions !== undefined) req.user.privacy.lastSeenExceptions = lastSeenExceptions;
@@ -324,6 +357,22 @@ router.patch('/me/privacy', requireAuth, async (req, res) => {
 // همگام‌سازی تنظیمات اپ بین دستگاه‌ها (تم و پیش‌نمایش لینک) - فقط مقدارهای معتبر ذخیره می‌شن
 router.patch('/me/app-settings', requireAuth, async (req, res) => {
   const { themeId, linkPreviews, quickReplies } = req.body || {};
+  const ignored = []; // گروه‌هایی که چون قدیمی‌تر از مقدار ثبت‌شده بودند نادیده گرفته شدند (کلاینت می‌تواند از سرور بخواند)
+  const { sanitizeLanguage, sanitizeLockPrefs, sanitizeTranslatePrefs, acceptStamp } = require('../utils/appSettingsPolicy');
+  const stamped = [
+    ['language', 'languageAt', sanitizeLanguage, (v) => { req.user.appSettings.language = v; }],
+    ['lockPrefs', 'lockPrefsAt', sanitizeLockPrefs, (v) => { req.user.appSettings.lockPrefs = { ...(req.user.appSettings.lockPrefs?.toObject?.() || {}), ...v }; }],
+    ['translate', 'translateAt', sanitizeTranslatePrefs, (v) => { req.user.appSettings.translate = { ...(req.user.appSettings.translate?.toObject?.() || {}), ...v }; }],
+  ];
+  for (const [key, atKey, sanitize, apply] of stamped) {
+    if (req.body?.[key] === undefined) continue;
+    const clean = sanitize(req.body[key]);
+    if (clean === null) return res.status(400).json({ error: 'مقدار نامعتبر است', field: key });
+    const at = acceptStamp(req.user.appSettings[atKey], Number(req.body[`${key}At`]));
+    if (at === null) { ignored.push(key); continue; }
+    apply(clean);
+    req.user.appSettings[atKey] = at;
+  }
   if (themeId !== undefined) {
     if (typeof themeId !== 'string' || !/^[a-z0-9_-]{1,30}$/i.test(themeId)) return res.status(400).json({ error: 'تم نامعتبر است' });
     req.user.appSettings.themeId = themeId;
@@ -338,7 +387,7 @@ router.patch('/me/app-settings', requireAuth, async (req, res) => {
     req.user.appSettings.quickReplies = clean;
   }
   await req.user.save();
-  res.json({ ok: true, appSettings: req.user.appSettings });
+  res.json({ ok: true, appSettings: req.user.appSettings, ignored });
 });
 
 router.patch('/me/notifications', requireAuth, async (req, res) => {
@@ -346,6 +395,11 @@ router.patch('/me/notifications', requireAuth, async (req, res) => {
   if (enabled !== undefined) req.user.notificationSettings.enabled = enabled;
   if (sound !== undefined) req.user.notificationSettings.sound = sound;
   if (preview !== undefined) req.user.notificationSettings.preview = preview;
+  if (req.body.dnd !== undefined) {
+    const clean = require('../utils/dndCore').sanitizeDnd(req.body.dnd);
+    if (!clean) return res.status(400).json({ error: 'تنظیم «مزاحم نشوید» نامعتبر است', field: 'dnd' });
+    req.user.notificationSettings.dnd = clean;
+  }
   await req.user.save();
   res.json({ ok: true, notificationSettings: req.user.notificationSettings });
 });
@@ -363,10 +417,26 @@ router.post('/logout', requireAuth, async (req, res) => {
 // --- مدیریت نشست‌ها / دستگاه‌ها ---
 router.get('/sessions', requireAuth, async (req, res) => {
   const sessions = await Session.find({ user: req.user._id, revoked: false }).sort({ lastActiveAt: -1 });
-  res.json(sessions.map((s) => ({ ...s.toObject(), isCurrent: s._id.toString() === req.sessionId?.toString() })));
+  res.json(sessions.map((s) => ({
+    _id: s._id,
+    deviceName: s.deviceName,
+    platform: s.platform,
+    appVersion: s.appVersion,
+    ip: s.ip,
+    lastActiveAt: s.lastActiveAt,
+    createdAt: s.createdAt,
+    restricted: isRestricted(s),
+    restrictedUntil: isRestricted(s) ? s.restrictedUntil : null,
+    isCurrent: s._id.toString() === req.sessionId?.toString(),
+  })));
 });
 
+// بستن نشست: خروج از خودِ همین دستگاه همیشه آزاد است؛ بستن نشستِ دیگر از دستگاه محدود/تازه مجاز نیست
 router.delete('/sessions/:id', requireAuth, async (req, res) => {
+  const isSelf = String(req.params.id) === String(req.sessionId);
+  if (!isSelf && isRestricted(req.sessionDoc)) {
+    return res.status(403).json({ error: 'این دستگاه به‌تازگی وارد شده و هنوز نمی‌تواند نشست‌های دیگر را ببندد', code: 'SESSION_RESTRICTED', until: req.sessionDoc.restrictedUntil });
+  }
   const session = await Session.findOne({ _id: req.params.id, user: req.user._id });
   if (!session) return res.status(404).json({ error: 'نشست یافت نشد' });
   session.revoked = true;
@@ -374,7 +444,7 @@ router.delete('/sessions/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/sessions/revoke-all-others', requireAuth, async (req, res) => {
+router.post('/sessions/revoke-all-others', requireAuth, requireTrustedSession, async (req, res) => {
   await Session.updateMany(
     { user: req.user._id, _id: { $ne: req.sessionId } },
     { revoked: true }
@@ -382,10 +452,23 @@ router.post('/sessions/revoke-all-others', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// «بله، خودم بودم»: فقط از یک نشستِ قدیمیِ معتبر (نه از خودِ دستگاه تازه) پذیرفته می‌شود
+router.post('/sessions/:id/confirm', requireAuth, async (req, res) => {
+  const target = await Session.findOne({ _id: req.params.id, user: req.user._id, revoked: false });
+  if (!target) return res.status(404).json({ error: 'نشست یافت نشد' });
+  if (!canConfirm(req.sessionDoc, target)) {
+    return res.status(403).json({ error: 'این نشست را فقط یک دستگاه قدیمی و معتبر می‌تواند تأیید کند', code: 'CANNOT_CONFIRM' });
+  }
+  target.confirmedAt = new Date();
+  target.restrictedUntil = null;
+  await target.save();
+  res.json({ ok: true });
+});
+
 
 // حذف حساب توسط خود کاربر (قابل برگشت نیست). رمز عبور الزامیه و اگه ورود دومرحله‌ای فعاله، کد هم لازمه.
 // مدیر (admin) نمی‌تونه حساب خودش رو پاک کنه تا سیستم بی‌ادمین نشه. پاک‌سازی: utils/dataCleanup.js → purgeUserAccount
-router.delete('/me', requireAuth, async (req, res) => {
+router.delete('/me', requireAuth, requireTrustedSession, async (req, res) => {
   const { password, code } = req.body || {};
   if (req.user.role === 'admin') return res.status(403).json({ error: 'حساب مدیر را نمی‌توان از اینجا حذف کرد' });
   const valid = await bcrypt.compare(password || '', req.user.passwordHash);
@@ -417,7 +500,7 @@ router.post('/2fa/enable', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/2fa/disable', requireAuth, async (req, res) => {
+router.post('/2fa/disable', requireAuth, requireTrustedSession, async (req, res) => {
   const { password } = req.body;
   const valid = await bcrypt.compare(password || '', req.user.passwordHash);
   if (!valid) return res.status(401).json({ error: 'رمز عبور اشتباه است' });
@@ -428,7 +511,7 @@ router.post('/2fa/disable', requireAuth, async (req, res) => {
 });
 
 // تغییر رمز عبور — لازمه چون خیلی از حساب‌ها رو ادمین/ناظر با یه رمز موقت می‌سازه
-router.post('/change-password', requireAuth, async (req, res) => {
+router.post('/change-password', requireAuth, requireTrustedSession, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!newPassword || newPassword.length < 6) {
     return res.status(400).json({ error: 'رمز جدید باید حداقل ۶ کاراکتر باشد' });

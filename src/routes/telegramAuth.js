@@ -92,7 +92,7 @@ router.post('/exchange', async (req, res) => {
       created = true;
     }
     if (user.status === 'banned') return res.status(403).json({ error: 'حساب شما مسدود شده است' });
-    const session = await createSession(user, { body: { deviceName: deviceName || 'دستگاه (ورود با تلگرام)' }, headers: req.headers, ip: req.ip, app: req.app });
+    const session = await createSession(user, { body: req.body, headers: req.headers, ip: req.ip, app: req.app });
     user.isOnline = true;
     user.lastSeen = new Date();
     await user.save();

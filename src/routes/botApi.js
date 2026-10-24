@@ -11,7 +11,7 @@ const { safeUploadName } = require('../utils/uploadName');
 const { looksLikeImage, allowBotUpload } = require('../utils/botMedia');
 
 // Bot API (شبیه تلگرام): POST/GET /bot-api/<token>/<method>   — بدنه JSON
-// getMe, getUpdates, setWebhook, deleteWebhook, sendMessage, editMessageText, deleteMessage, setMyCommands, answerCallbackQuery
+// getMe, getUpdates, setWebhook, deleteWebhook, sendMessage, editMessageText, deleteMessage, setMyCommands, answerCallbackQuery, answerInlineQuery
 const router = express.Router();
 
 const ok = (res, result) => res.json({ ok: true, result });
@@ -130,6 +130,13 @@ router.all('/:token/:method', async (req, res) => {
         await m.save();
         await require('../utils/dataCleanup').unpinMessages([m._id]);
         io.to(`chat:${m.chat}`).emit('message:deleted', { messageId: String(m._id), forEveryone: true });
+        return ok(res, true);
+      }
+      case 'answerInlineQuery': {
+        // results: [{id, title, description?, message_text}] — فقط متن؛ تصویر/thumb بیرونی عمداً پذیرفته نمی‌شود
+        if (!p.inline_query_id) return fail(res, 400, 'inline_query_id is required');
+        if (!Array.isArray(p.results)) return fail(res, 400, 'results must be an array');
+        if (!engine.answerInline(p.inline_query_id, bot._id, p.results)) return fail(res, 400, 'inline_query_id is invalid or expired');
         return ok(res, true);
       }
       case 'answerCallbackQuery': {

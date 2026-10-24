@@ -5,7 +5,7 @@ const messageSchema = new mongoose.Schema(
     chat: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat', required: true, index: true },
     sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     clientId: { type: String, default: null }, // شناسه‌ی سمت کلاینت برای جلوگیری از پیام تکراری (Optimistic UI)
-    type: { type: String, enum: ['text', 'image', 'video', 'video_note', 'file', 'voice', 'call_log', 'sticker', 'system_action', 'poll', 'location', 'contact'], default: 'text' },
+    type: { type: String, enum: ['text', 'image', 'video', 'video_note', 'file', 'voice', 'audio', 'call_log', 'sticker', 'system_action', 'poll', 'location', 'contact', 'checklist'], default: 'text' },
     content: { type: String, default: '' },
     mediaUrl: { type: String, default: '' },
     mediaMeta: {
@@ -23,10 +23,14 @@ const messageSchema = new mongoose.Schema(
       action: String,
       sessionId: String,
       url: String,
+      enabled: Boolean, // پیام سرویسِ protected_content: روشن/خاموش (بدون این فیلد strict mode آن را حذف می‌کرد)
+      ttlSeconds: Number, // پیام سرویسِ چت مخفی (action=secret_ttl): تایمر جدید؛ بدون این فیلد strict mode آن را حذف می‌کرد
     },
     topic: { type: mongoose.Schema.Types.ObjectId, default: undefined }, // شناسه‌ی تاپیکِ گروه (Chat.topics._id)؛ خالی = «عمومی»
     tags: { type: [String], default: undefined }, // فقط تو چتِ ذخیره‌شده‌ی خودِ کاربر (routes/chats.js → /messages/:id/tags)
     replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
+    // بازه‌ی نویسه‌ها در متن پیام اصلی (utils/replyQuote.js)؛ مسیرهای تو در تو تا Mongoose آن را Mixed/خالی نکند
+    replyQuote: { start: { type: Number, default: undefined }, end: { type: Number, default: undefined } },
     mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     forwardedFrom: {
       originalSender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
@@ -71,8 +75,10 @@ const messageSchema = new mongoose.Schema(
     // بازدید پست‌های کانال (یکتا به‌ازای هر کاربر)؛ فهرست بازدیدکننده‌ها هیچ‌وقت تو جواب API نمیاد
     views: { type: Number, default: 0 },
     viewedBy: { type: [mongoose.Schema.Types.ObjectId], select: false, default: undefined },
+    inlineVia: { type: new mongoose.Schema({ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, username: String }, { _id: false }), default: undefined }, // «via @bot»: پیامِ کاربر که از نتایج inline یک ربات ساخته شده
     viaBot: { type: Boolean, default: false }, // پیامِ ساخته‌شده توسط ربات (بدون E2E؛ سرور محتواش رو داره)
     botMarkup: { type: mongoose.Schema.Types.Mixed, default: undefined }, // دکمه‌های شیشه‌ای: { buttons: [[{text, callback_data|url}]] }
+    checklistDone: [{ index: Number, by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, _id: false }],
     pollVotes: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, options: [Number], _id: false }],
     e2e: {
       senderDeviceId: { type: String, default: null },

@@ -1,6 +1,7 @@
 const { verifyAccessToken, isTokenCurrent } = require('../utils/tokens');
 const User = require('../models/User');
 const Session = require('../models/Session');
+const { isRestricted } = require('../utils/sessionPolicy');
 
 async function requireAuth(req, res, next) {
   try {
@@ -27,6 +28,7 @@ async function requireAuth(req, res, next) {
       session.lastActiveAt = new Date();
       session.save().catch(() => {});
       req.sessionId = session._id;
+      req.sessionDoc = session;
     }
 
     req.user = user;
@@ -34,6 +36,18 @@ async function requireAuth(req, res, next) {
   } catch (err) {
     return res.status(401).json({ error: 'توکن نامعتبر است' });
   }
+}
+
+// عملیات حساس (بستن نشست‌های دیگر، تغییر رمز، خاموش‌کردن 2FA، حذف حساب) از نشستِ محدودِ تازه مجاز نیست (utils/sessionPolicy.js)
+function requireTrustedSession(req, res, next) {
+  if (isRestricted(req.sessionDoc)) {
+    return res.status(403).json({
+      error: 'این دستگاه به‌تازگی وارد شده؛ تا ۲۴ ساعت یا تأیید از دستگاه قدیمی نمی‌تواند این کار را انجام دهد',
+      code: 'SESSION_RESTRICTED',
+      until: req.sessionDoc.restrictedUntil,
+    });
+  }
+  next();
 }
 
 function requireRole(...roles) {
@@ -45,4 +59,4 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { requireAuth, requireRole };
+module.exports = { requireAuth, requireRole, requireTrustedSession };

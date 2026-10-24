@@ -7,8 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed:admin": "node src/utils/seedAdmin.js",
-    "test": "node --test tests/unit.test.js tests/asyncErrors.test.js tests/safeHttp.test.js",
-    "test:integration": "node --test tests/cleanup.integration.test.js"
+    "test": "node --test tests/unit.test.js tests/asyncErrors.test.js tests/safeHttp.test.js tests/sessionPolicy.test.js tests/appSettingsPolicy.test.js tests/dndCore.test.js tests/gifCore.test.js tests/checklistPolicy.test.js tests/dateTokenStrip.test.js tests/secretPolicy.test.js tests/inlineCore.test.js tests/loginAlert.test.js",
+    "test:integration": "node --test --test-force-exit --test-concurrency=1 tests/cleanup.integration.test.js tests/send.integration.test.js tests/sessions.integration.test.js tests/retention.integration.test.js tests/appsettings.integration.test.js tests/forward.integration.test.js tests/chatfeatures.integration.test.js"
   },
   "dependencies": {
     "@noble/curves": "2.4.0",
@@ -26,7 +26,8 @@
     "socket.io": "^4.7.5"
   },
   "devDependencies": {
+    "mongodb-memory-server": "^10.1.2",
     "nodemon": "^3.1.4",
-    "mongodb-memory-server": "^10.1.2"
+    "socket.io-client": "^4.8.4"
   }
 }

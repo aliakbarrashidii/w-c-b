@@ -27,7 +27,6 @@ const groupRoutes = require('./routes/groups');
 const initSocket = require('./socket');
 
 const app = express();
-app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 app.set('io', io);
@@ -91,6 +90,7 @@ app.use('/api/moderation', moderationRoutes);
 app.use('/api/groups', groupRoutes);
 app.use('/api/stickers', require('./routes/stickers').userRouter);
 app.use('/api/bots', require('./routes/bots'));
+app.use('/api/gifs', require('./routes/gifs').createGifRouter());
 app.use('/bot-api', require('./routes/botApi'));
 app.use('/api/auth/telegram', require('./routes/telegramAuth'));
 app.use('/wallpapers', express.static(path.join(__dirname, '..', 'wallpapers')));

@@ -36,11 +36,22 @@ const userSchema = new mongoose.Schema(
       lastSeenVisibility: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
       lastSeenExceptions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // اگه everyone: این‌ها استثنا و ازشون مخفیه؛ اگه nobody: فقط این‌ها می‌بینن
       readReceiptsEnabled: { type: Boolean, default: true },
+      groupAdd: { type: String, enum: ['everyone', 'contacts', 'nobody'], default: 'everyone' }, // چه کسی می‌تواند من را به گروه اضافه کند (utils/groupAddPolicy.js)
     },
     notificationSettings: {
       enabled: { type: Boolean, default: true },
       sound: { type: Boolean, default: true },
       preview: { type: Boolean, default: true },
+      // «مزاحم نشوید» (utils/dndCore.js): mode off|until|schedule؛ در حالت فعال هیچ پوشِ پیام نمی‌رود (تماس فقط اگر allowCalls خاموش باشد)
+      dnd: {
+        mode: { type: String, enum: ['off', 'until', 'schedule'], default: 'off' },
+        until: { type: Number, default: 0 },
+        allowCalls: { type: Boolean, default: false },
+        schedule: {
+          from: { type: String, default: undefined }, to: { type: String, default: undefined },
+          days: { type: [Number], default: undefined }, tzOffsetMin: { type: Number, default: 0 },
+        },
+      },
     },
     folders: [
       {
@@ -65,6 +76,16 @@ const userSchema = new mongoose.Schema(
       themeId: { type: String, default: '' },
       linkPreviews: { type: Boolean, default: null },
       quickReplies: [{ shortcut: String, text: String, _id: false }], // پاسخ‌های سریع (utils/quickReplies.js)
+      // همگام‌سازی با مهر زمانی (آخرین نوشتن برنده؛ utils/appSettingsPolicy.js). کد قفل، روشن‌بودن قفل و کلید API ترجمه عمداً همگام نمی‌شوند
+      language: { type: String, default: '' }, languageAt: { type: Number, default: 0 },
+      lockPrefs: {
+        autoLockMode: { type: String, default: undefined },
+        autoLockMinutes: { type: Number, default: undefined },
+        hideNotificationContent: { type: Boolean, default: undefined },
+      },
+      lockPrefsAt: { type: Number, default: 0 },
+      translate: { baseUrl: { type: String, default: undefined }, model: { type: String, default: undefined }, target: { type: String, default: undefined } },
+      translateAt: { type: Number, default: 0 },
     },
     tokenVersion: { type: Number, default: 0 }, // با هر «ابطال توکن‌ها» بالا می‌ره (utils/tokens.js)
     isBot: { type: Boolean, default: false },

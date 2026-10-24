@@ -272,3 +272,13 @@ test('توکن موقتِ 2FA نباید به‌عنوان توکن دسترسی
     assert.equal((await run(normal, { ...user, status: 'deleted' })).status, 401, 'حساب حذف‌شده');
   } finally { User.findById = original; }
 });
+
+test('Chat: inviteCode/publicUsername بدون default و با ایندکس partial (چت دوم نباید E11000 بدهد)', () => {
+  const Chat = require('../src/models/Chat');
+  const c = new Chat({ type: 'group', title: 'g', members: [] }).toObject();
+  assert.equal('inviteCode' in c, false);
+  assert.equal('publicUsername' in c, false);
+  const idx = Chat.schema.indexes().filter((i) => i[0].inviteCode || i[0].publicUsername);
+  assert.equal(idx.length, 2);
+  for (const [, opts] of idx) assert.ok(opts.unique && opts.partialFilterExpression && !opts.sparse, 'باید unique + partial باشد نه sparse');
+});

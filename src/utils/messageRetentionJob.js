@@ -14,7 +14,7 @@ async function purgeMatching(filter) {
   return result.deletedCount || 0;
 }
 
-const MEDIA_TYPES = ['image', 'video', 'voice', 'video_note', 'file'];
+const MEDIA_TYPES = ['image', 'video', 'voice', 'video_note', 'file', 'audio'];
 
 async function runRetentionCleanup() {
   const settings = await getSettings();

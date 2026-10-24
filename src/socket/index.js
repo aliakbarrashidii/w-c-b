@@ -5,15 +5,22 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Chat = require('../models/Chat');
 const { unpinMessages } = require('../utils/dataCleanup');
-const { anonymizeChannelSender } = require('../utils/channelPrivacy');
+const { anonymizeChannelSender, shapeForwardedFrom } = require('../utils/channelPrivacy');
 const { verifyAccessToken, isTokenCurrent } = require('../utils/tokens');
 const Message = require('../models/Message');
 const CallLog = require('../models/CallLog');
 const Session = require('../models/Session');
 const Activity = require('../models/Activity');
 const { encryptText, decryptText } = require('../utils/crypto');
+const checklistPolicy = require('../utils/checklistPolicy');
+const Bot = require('../models/Bot');
+const secretPolicy = require('../utils/secretPolicy');
+const { postSecretService } = require('../utils/secretService');
+const { stripDateTokens } = require('../utils/dateTokenStrip');
 const { scanContent } = require('../utils/contentFilter');
 const { sendPushNotifications } = require('../utils/push');
+const { shouldPush } = require('../utils/pushPolicy');
+const { sanitizeReplyQuote } = require('../utils/replyQuote');
 const { markFullyDelivered } = require('../utils/messageDelivery');
 const { startRetentionScheduler } = require('../utils/messageRetentionJob');
 const { getSettings } = require('../utils/settings');
@@ -58,7 +65,7 @@ module.exports = function initSocket(io) {
       socket.user = user;
       next();
     } catch (err) {
-      next(new Error('توکن نامعتبر است'));
+      console.error('[socket auth]', err.message); next(new Error('توکن نامعتبر است'));
     }
   });
 
@@ -69,48 +76,62 @@ module.exports = function initSocket(io) {
     // پیامِ چت‌های دیگه کار کنه: فوروارد/ریپلای = خوندن محتوا، ری‌اکشن/ریویل = دستکاری)
     const isMemberOf = async (chatId) => !!(chatId && (await Chat.exists({ _id: chatId, 'members.user': userId })));
     addOnline(userId, socket.id);
-
-    await User.findByIdAndUpdate(userId, { isOnline: true });
-    socket.broadcast.emit('presence:update', { userId, isOnline: true });
-
-    // عضویت در روم تک‌تک چت‌های کاربر برای دریافت پیام‌های لحظه‌ای
-    const chats = await Chat.find({ 'members.user': userId }).select('_id members');
-    chats.forEach((c) => socket.join(`chat:${c._id}`));
-    // روم شخصیِ خودِ کاربر - برای رویدادهایی مثل تغییر عضویت گروه که ممکنه چتش باز نباشه
+    // ⚠️ باگ «اولین پیام ارسال نمی‌شود/ack نمی‌آید»: این بلوک چند await دارد (به‌روزرسانی وضعیت، بارگذاری همه‌ی چت‌ها، حلقه‌ی تحویل پیام‌های معوق)
+    // و قبلاً «قبل از» ثبت هندلرها اجرا می‌شد؛ هر رویدادی که کلاینت بلافاصله بعد از (باز)اتصال می‌فرستاد - مثل پیام‌های صف‌شده‌ی socket.io
+    // هنگام reconnect - به هندلرِ ثبت‌نشده می‌رسید و بی‌صدا دور ریخته می‌شد (بدون ack ← «ارسال ناموفق»؛ با تلاش مجدد درست می‌شد).
+    // اکنون: هندلرها همگام ثبت می‌شوند و این راه‌اندازی بعدش (ته همین تابع) و بدون مسدود کردن اجرا می‌شود.
     socket.join(`user:${userId}`);
 
-    // توزیع‌های سندرکیِ گروهی که وقتی کاربر آفلاین بوده براش صف شدن، همین لحظه که وصل شد می‌رسن
-    const pendingDistributions = await SenderKeyDistribution.find({ toUser: userId });
-    pendingDistributions.forEach((d) => {
-      socket.emit('senderkey:distribution', { id: d._id, groupId: d.groupId, fromUserId: d.fromUser, e2e: d.e2e });
-    });
+    const connectionSetup = async () => {
+      await User.findByIdAndUpdate(userId, { isOnline: true });
+      socket.broadcast.emit('presence:update', { userId, isOnline: true });
 
-    // پیام‌هایی که وقتی کاربر آفلاین بوده براش اومده، همین لحظه که وصل شد delivered می‌شن
-    for (const c of chats) {
-      const pending = await Message.find({
-        chat: c._id,
-        sender: { $ne: userId },
-        'deliveredTo.user': { $ne: userId },
-        deletedForEveryone: { $ne: true },
-      }).select('_id chat');
-      if (pending.length) {
-        await Message.updateMany(
-          { _id: { $in: pending.map((m) => m._id) } },
-          { $addToSet: { deliveredTo: { user: userId, deliveredAt: new Date() } } }
-        );
-        io.to(`chat:${c._id}`).emit('message:delivered', {
-          chatId: c._id,
-          messageIds: pending.map((m) => m._id),
-          toUserIds: [userId],
-        });
-        await markFullyDelivered(c, pending.map((m) => m._id));
+      // عضویت در روم تک‌تک چت‌های کاربر برای دریافت پیام‌های لحظه‌ای
+      const chats = await Chat.find({ 'members.user': userId }).select('_id members');
+      chats.forEach((c) => socket.join(`chat:${c._id}`));
+      // روم شخصیِ خودِ کاربر - برای رویدادهایی مثل تغییر عضویت گروه که ممکنه چتش باز نباشه
+
+      // توزیع‌های سندرکیِ گروهی که وقتی کاربر آفلاین بوده براش صف شدن، همین لحظه که وصل شد می‌رسن
+      const pendingDistributions = await SenderKeyDistribution.find({ toUser: userId });
+      pendingDistributions.forEach((d) => {
+        socket.emit('senderkey:distribution', { id: d._id, groupId: d.groupId, fromUserId: d.fromUser, e2e: d.e2e });
+      });
+
+      // پیام‌هایی که وقتی کاربر آفلاین بوده براش اومده، همین لحظه که وصل شد delivered می‌شن
+      // یک کوئریِ واحد برای همه‌ی چت‌ها (قبلاً N+1: برای هر چت یک find + updateMany ← با ده‌ها چت چند ثانیه طول می‌کشید)
+      if (chats.length) {
+        const pendingAll = await Message.find({
+          chat: { $in: chats.map((c) => c._id) },
+          sender: { $ne: userId },
+          'deliveredTo.user': { $ne: userId },
+          deletedForEveryone: { $ne: true },
+        }).select('_id chat');
+        if (pendingAll.length) {
+          await Message.updateMany(
+            { _id: { $in: pendingAll.map((m) => m._id) } },
+            { $addToSet: { deliveredTo: { user: userId, deliveredAt: new Date() } } }
+          );
+          const byChat = new Map();
+          for (const m of pendingAll) {
+            const key = String(m.chat);
+            if (!byChat.has(key)) byChat.set(key, []);
+            byChat.get(key).push(m._id);
+          }
+          for (const c of chats) {
+            const ids = byChat.get(String(c._id));
+            if (!ids) continue;
+            io.to(`chat:${c._id}`).emit('message:delivered', { chatId: c._id, messageIds: ids, toUserIds: [userId] });
+            await markFullyDelivered(c, ids);
+          }
+        }
       }
-    }
+    };
+
 
     // --- پیام‌رسانی ---
     socket.on('message:send', async (data, ack) => {
       try {
-        const { chatId, type = 'text', content = '', mediaUrl = '', mediaMeta = {}, replyTo: rawReplyTo = null, clientId = null, e2e = null, groupE2e = null, scheduledFor = null, viewOnceDurationSec = null, silent = false, topicId = null } = data;
+        const { chatId, type = 'text', content = '', mediaUrl = '', mediaMeta = {}, replyTo: rawReplyTo = null, replyQuote: rawReplyQuote = null, clientId = null, e2e = null, groupE2e = null, scheduledFor = null, viewOnceDurationSec = null, silent = false, topicId = null, inlineVia: rawInlineVia = null } = data;
         // ریپلای فقط به پیامِ «همین چت» مجازه؛ وگرنه GET پیام‌ها محتوای رمزگشایی‌شده‌ی پیامِ چت دیگه رو برمی‌گردوند (IDOR)
         let replyTo = null;
         if (rawReplyTo) {
@@ -127,7 +148,7 @@ module.exports = function initSocket(io) {
 
         // مجوزهای گروه/کانال برای اعضای عادی + سکوت موقتِ فردی (ادمین/مالک مستثنی)
         if (['group', 'channel'].includes(chat.type)) {
-          const permFor = { text: 'sendMessages', sticker: 'sendStickers', poll: 'sendPolls', location: 'sendPolls', contact: 'sendPolls' }[type] || 'sendMedia';
+          const permFor = { text: 'sendMessages', sticker: 'sendStickers', poll: 'sendPolls', location: 'sendPolls', contact: 'sendPolls', checklist: 'sendPolls' }[type] || 'sendMedia';
           if (!chatRights.memberAllowed(chat, userId, permFor)) {
             const until = chatRights.restrictionRemaining(chat, userId);
             return ack?.({ error: until ? 'مدیر گروه ارسال پیام از طرف تو رو موقتاً محدود کرده' : 'مدیر گروه این نوع پیام رو برای اعضا بسته', restricted: true });
@@ -157,6 +178,7 @@ module.exports = function initSocket(io) {
         if (scheduledFor && new Date(scheduledFor) > new Date()) {
           const scheduled = await ScheduledMessage.create({
             chat: chatId, sender: userId, clientId, type, content, e2e, groupE2e, mediaUrl, mediaMeta, replyTo,
+            ...(replyTo && sanitizeReplyQuote(rawReplyQuote) ? { replyQuote: sanitizeReplyQuote(rawReplyQuote) } : {}), // فقط وقتی واقعاً پاسخ باشد
             scheduledFor: new Date(scheduledFor),
           });
           return ack?.({ ok: true, scheduled: true, scheduledId: scheduled._id, scheduledFor: scheduled.scheduledFor });
@@ -172,6 +194,16 @@ module.exports = function initSocket(io) {
             if (!dup.e2e?.senderDeviceId && !dup.groupE2e?.ciphertext) dup.content = decryptText(dup.content);
             return ack?.({ ok: true, message: dup, duplicate: true });
           }
+        }
+
+        // «via @bot»: فقط وقتی ربات واقعاً حالت inline دارد (کلاینت نمی‌تواند نام ربات دلخواه را جعل کند)
+        let inlineVia;
+        if (rawInlineVia && type === 'text') {
+          try {
+            const bu = await User.findOne({ _id: rawInlineVia, isBot: true }).select('username');
+            const bb = bu && (await Bot.findOne({ user: bu._id, active: true, disabledByAdmin: false }).select('inline'));
+            if (bb?.inline?.enabled) inlineVia = { user: bu._id, username: bu.username };
+          } catch { /* شناسه‌ی نامعتبر = بدون برچسب */ }
         }
 
         const onlineMemberIds = chat.members
@@ -207,10 +239,12 @@ module.exports = function initSocket(io) {
           mediaUrl,
           mediaMeta,
           replyTo,
+          ...(replyTo && sanitizeReplyQuote(rawReplyQuote) ? { replyQuote: sanitizeReplyQuote(rawReplyQuote) } : {}), // فقط وقتی واقعاً پاسخ باشد
           // تاپیکِ گروه: فقط اگه شناسه واقعاً مال همین گروهه (وگرنه پیام «عمومی» می‌شه)
           topic: chat.type === 'group' && topicId && chat.topics?.some((t) => String(t._id) === String(topicId)) ? topicId : undefined,
           viewOnceDurationSec: viewOnceDurationSec > 0 ? viewOnceDurationSec : undefined,
           mentions: mentionedUserIds,
+          ...(inlineVia ? { inlineVia } : {}),
           deliveredTo: onlineMemberIds.map((u) => ({ user: u })), // گیرنده‌های آنلاین همون لحظه delivered حساب می‌شن
         });
         await message.populate('sender', 'username displayName avatarUrl isBot');
@@ -268,10 +302,10 @@ module.exports = function initSocket(io) {
           const recipientUsers = await User.find({ _id: { $in: offlineMembers.map((m) => m.user) } }).select(
             'pushTokens notificationSettings'
           );
-          const previewText = type === 'text' ? content : type === 'image' ? '📷 عکس' : type === 'video' ? '🎥 ویدیو' : type === 'voice' ? '🎤 پیام صوتی' : type === 'poll' ? '📊 نظرسنجی' : type === 'location' ? '📍 موقعیت مکانی' : type === 'contact' ? '👤 مخاطب' : 'فایل جدید';
+          const previewText = type === 'text' ? stripDateTokens(content) : type === 'image' ? '📷 عکس' : type === 'video' ? '🎥 ویدیو' : type === 'voice' ? '🎤 پیام صوتی' : type === 'audio' ? '🎵 موسیقی' : type === 'poll' ? '📊 نظرسنجی' : type === 'checklist' ? '✅ چک‌لیست' : type === 'location' ? '📍 موقعیت مکانی' : type === 'contact' ? '👤 مخاطب' : 'فایل جدید';
           for (const recipient of recipientUsers) {
             const settings = recipient.notificationSettings || {};
-            if (settings.enabled === false) continue; // این کاربر نوتیفیکیشن پیام رو غیرفعال کرده
+            if (!shouldPush(settings, 'message')) continue; // اعلان پیام غیرفعال، یا «مزاحم نشوید» فعال
             sendPushNotifications(recipient.pushTokens, {
               title: socket.user.displayName,
               body: settings.preview === false ? 'پیام جدید' : previewText.slice(0, 120),
@@ -328,12 +362,21 @@ module.exports = function initSocket(io) {
     });
 
     // فوروارد یک پیام به یک یا چند چت دیگر (شامل «پیام‌های ذخیره‌شده»)
-    socket.on('message:forward', async ({ messageId, toChatIds = [] }, ack) => {
+    socket.on('message:forward', async ({ messageId, toChatIds = [], hideSender = false }, ack) => {
       try {
         const original = await Message.findById(messageId);
         if (!original) return ack?.({ error: 'پیام یافت نشد' });
         // فقط پیامی که خودت توش عضوی قابل فوروارده (قبلاً با دونستن messageId می‌شد محتوا/فایل هر پیامی رو به چت خودت کپی کرد)
         if (original.deletedForEveryone || !(await isMemberOf(original.chat))) return ack?.({ error: 'دسترسی ندارید' });
+        // پیام E2E (رمز سمت کلاینت) را سرور نمی‌تواند برای چت دیگر بازرمز کند؛ کپی‌اش پیام خالی/غیرقابل‌خواندن می‌ساخت
+        // (e2e.senderDeviceId = چت خصوصی، groupE2e.ciphertext = گروه Sender Key، چت «secret» = محتوای رمزشده‌ی کلاینتی، mediaMeta.encrypted = رسانه‌ی رمزشده)
+        const origChat = await Chat.findById(original.chat).select('type protectedContent');
+        // چت محافظت‌شده (و چت مخفی) هرگز؛ از جمله فوروارد به «پیام‌های ذخیره‌شده»ی خودِ کاربر
+        const blocked = secretPolicy.forwardBlock(origChat);
+        if (blocked) return ack?.(blocked);
+        if (original.e2e?.senderDeviceId || original.groupE2e?.ciphertext || original.mediaMeta?.encrypted) {
+          return ack?.({ error: 'پیام رمزنگاری‌شده قابل فوروارد نیست', code: 'E2E_FORWARD' });
+        }
 
         const results = [];
         for (const targetChatId of toChatIds) {
@@ -349,9 +392,11 @@ module.exports = function initSocket(io) {
             content: original.content, // از قبل رمزنگاری‌شده روی دیتابیس است، مستقیم کپی می‌شود
             mediaUrl: original.mediaUrl,
             mediaMeta: original.mediaMeta,
-            forwardedFrom: { originalSender: original.sender, originalChat: original.chat },
+            // hideSender: مثل «Hide sender name» تلگرام؛ پیام بدون هیچ برچسب فوروارد (کپی) ارسال می‌شود
+            ...(hideSender ? {} : { forwardedFrom: { originalSender: original.sender, originalChat: original.chat } }),
           });
           await forwarded.populate('sender', 'username displayName avatarUrl isBot');
+          await forwarded.populate([{ path: 'forwardedFrom.originalSender', select: 'displayName' }, { path: 'forwardedFrom.originalChat', select: 'title type' }]);
 
           chat.lastMessage = forwarded._id;
           chat.lastActivityAt = new Date();
@@ -360,6 +405,7 @@ module.exports = function initSocket(io) {
           const outgoing = forwarded.toObject();
           outgoing.content = decryptText(outgoing.content);
           anonymizeChannelSender(chat, outgoing);
+          shapeForwardedFrom(outgoing);
           io.to(`chat:${targetChatId}`).emit('message:new', outgoing);
           results.push(outgoing);
         }
@@ -394,17 +440,44 @@ module.exports = function initSocket(io) {
     });
 
     socket.on('message:read', async ({ chatId, messageId }) => {
-      await Message.findByIdAndUpdate(messageId, {
-        $addToSet: { readBy: { user: userId, readAt: new Date() } },
-      });
-      socket.to(`chat:${chatId}`).emit('message:read', { chatId, messageId, userId });
+      // قبلاً هر سوکتی برای هر پیام/اتاقی «خوانده شد» ثبت و پخش می‌کرد؛ حالا فقط عضوِ همان چت و پیامِ همان چت
+      if (!chatId || !messageId || !(await isMemberOf(chatId))) return;
+      const msg = await Message.findOne({ _id: messageId, chat: chatId }).select('readBy.user sender type expiresAt');
+      if (!msg) return;
 
-      // خودتخریب چت مخفی: از لحظه‌ی خوانده‌شدن، شمارش معکوس شروع می‌شه
+      // خودتخریب چت مخفی: از لحظه‌ی خوانده‌شدن (توسط گیرنده) شمارش معکوس شروع می‌شود — «مستقل از رسید خوانده‌شدن»
+      // (قبلاً اگر گیرنده رسید را خاموش کرده بود تایمر هرگز شروع نمی‌شد و پیام برای همیشه می‌ماند)
       const chat = await Chat.findById(chatId).select('type secretSettings');
-      if (chat?.type === 'secret' && chat.secretSettings?.ttlSeconds > 0) {
-        const expiresAt = new Date(Date.now() + chat.secretSettings.ttlSeconds * 1000);
-        await Message.findByIdAndUpdate(messageId, { expiresAt });
+      const expiresAt = secretPolicy.expiryOnRead(chat, msg, userId);
+      if (expiresAt) {
+        const upd = await Message.updateOne({ _id: messageId, expiresAt: null }, { expiresAt });
+        if (upd.modifiedCount || upd.nModified) io.to(`chat:${chatId}`).emit('message:expires', { chatId: String(chatId), messageId: String(messageId), expiresAt });
       }
+
+      // کسی که «رسید خوانده‌شدن» را خاموش کرده، نه ثبت می‌کند و نه پخش (مثل تلگرام)
+      const me = await User.findById(userId).select('privacy.readReceiptsEnabled').lean();
+      if (me?.privacy?.readReceiptsEnabled === false) return;
+      // ثبتِ یک‌باره‌ی هر کاربر (قبلاً با $addToSet روی شیء شامل readAt، هر بار یک ردیف تکراری اضافه می‌شد)
+      if (!(msg.readBy || []).some((r) => String(r.user) === String(userId))) {
+        await Message.updateOne({ _id: messageId }, { $push: { readBy: { user: userId, readAt: new Date() } } });
+      }
+      socket.to(`chat:${chatId}`).emit('message:read', { chatId, messageId, userId });
+    });
+
+    // اعلان اسکرین‌شات در چت مخفی (مثل تلگرام): کلاینت وقتی اسکرین‌شات را تشخیص می‌دهد می‌فرستد؛ سرور فقط
+    // عضویت/نوع چت را می‌سنجد، نرخ را محدود می‌کند و پیام سرویس می‌سازد. (کلاینت دستکاری‌شده می‌تواند نفرستد: «تشخیص» است نه «تضمین».)
+    const lastScreenshotAt = new Map();
+    socket.on('secret:screenshot', async ({ chatId } = {}, ack) => {
+      try {
+        if (!chatId || !(await isMemberOf(chatId))) return ack?.({ error: 'عضو نیستید' });
+        const chat = await Chat.findById(chatId).select('type');
+        if (chat?.type !== 'secret') return ack?.({ error: 'چت مخفی نیست' });
+        const key = String(chatId);
+        if (!secretPolicy.screenshotAllowed(lastScreenshotAt.get(key))) return ack?.({ ok: true, throttled: true });
+        lastScreenshotAt.set(key, Date.now());
+        await postSecretService(io, chat, userId, 'secret_screenshot');
+        ack?.({ ok: true });
+      } catch (err) { ack?.({ error: 'خطا' }); }
     });
 
     // پیامِ خودمخربِ تایم‌دار (هر چتی) - فقط وقتی گیرنده صراحتاً «باز/نمایش» می‌زنه شمارش‌معکوس شروع می‌شه،
@@ -491,6 +564,23 @@ module.exports = function initSocket(io) {
       } catch (err) { ack?.({ error: 'خطا' }); }
     });
 
+    // تیک‌زدن/برداشتنِ یک آیتمِ چک‌لیست (هر عضو چت؛ فقط ایندکس‌ها روی سرورند، متن آیتم‌ها نه)
+    socket.on('checklist:toggle', async ({ messageId, index, done } = {}, ack) => {
+      try {
+        const msg = await Message.findById(messageId);
+        if (!msg || msg.type !== 'checklist' || msg.deletedForEveryone) return ack?.({ error: 'چک‌لیست پیدا نشد' });
+        const chat = await Chat.findById(msg.chat).select('members');
+        if (!chat?.members.some((m) => m.user.toString() === userId)) return ack?.({ error: 'عضو نیستید' });
+        const next = checklistPolicy.toggle(msg.checklistDone, userId, index, !!done);
+        if (!next) return ack?.({ error: 'آیتم نامعتبر' });
+        msg.checklistDone = next;
+        await msg.save();
+        const shaped = checklistPolicy.shapeDone(msg.checklistDone);
+        io.to(`chat:${msg.chat}`).emit('checklist:update', { messageId: msg._id.toString(), done: shaped });
+        ack?.({ ok: true, done: shaped });
+      } catch (err) { ack?.({ error: 'خطا' }); }
+    });
+
     socket.on('call:invite', async ({ chatId, calleeId, kind }) => {
       const callBlocked = await restrictionGuard(userId, 'calls');
       if (callBlocked) return socket.emit('restriction:error', { message: callBlocked });
@@ -506,8 +596,8 @@ module.exports = function initSocket(io) {
           })
         );
       } else {
-        const callee = await User.findById(calleeId).select('pushTokens');
-        sendPushNotifications(callee?.pushTokens || [], {
+        const callee = await User.findById(calleeId).select('pushTokens notificationSettings');
+        if (shouldPush(callee?.notificationSettings, 'call')) sendPushNotifications(callee?.pushTokens || [], {
           title: socket.user.displayName,
           body: kind === 'video' ? 'تماس تصویری ورودی' : 'تماس صوتی ورودی',
           data: { chatId, type: 'call', callId: callLog._id.toString(), kind, callerId: userId, recipientId: String(calleeId) },
@@ -547,6 +637,9 @@ module.exports = function initSocket(io) {
         socket.broadcast.emit('presence:update', { userId, isOnline: false, lastSeen: new Date() });
       }
     });
+
+    // راه‌اندازی async بعد از ثبت همه‌ی هندلرها (بالا)
+    connectionSetup().catch((err) => console.error('[socket setup]', err.message));
   });
 
   // جاروب دوره‌ای پیام‌های چت مخفیِ زمان‌شون تموم شده (خودتخریب)
@@ -594,6 +687,7 @@ module.exports = function initSocket(io) {
           mediaUrl: sched.mediaUrl,
           mediaMeta: sched.mediaMeta,
           replyTo: sched.replyTo,
+          ...(sched.replyQuote?.end > sched.replyQuote?.start ? { replyQuote: { start: sched.replyQuote.start, end: sched.replyQuote.end } } : {}),
           deliveredTo: onlineMemberIds.map((u) => ({ user: u })),
         });
         await message.populate('sender', 'username displayName avatarUrl isBot');

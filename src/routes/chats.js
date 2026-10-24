@@ -1,7 +1,17 @@
 const express = require('express');
 const Chat = require('../models/Chat');
 const mongoose = require('mongoose');
-const { anonymizeChannelSender } = require('../utils/channelPrivacy');
+const { anonymizeChannelSender, shapeForwardedFrom } = require('../utils/channelPrivacy');
+const { partitionAddable } = require('../utils/groupAddPolicy');
+
+// کاربرانی که حریم‌شان اجازه‌ی افزودن توسط این کاربر را نمی‌دهد کنار گذاشته می‌شوند (و در پاسخ skippedMembers گزارش می‌شوند)
+async function filterByGroupAddPrivacy(ids, adderId) {
+  if (!ids.length) return { allowed: [], skipped: [] };
+  const users = await User.find({ _id: { $in: ids } }).select('privacy.groupAdd savedContacts isBot');
+  const { allowed, skipped } = partitionAddable(users, adderId);
+  const known = new Set(users.map((u) => String(u._id)));
+  return { allowed: ids.filter((id) => allowed.includes(String(id)) || !known.has(String(id))), skipped };
+}
 const { clampNumber } = require('../utils/adminGuards');
 const rateLimit = require('express-rate-limit');
 const Message = require('../models/Message');
@@ -14,6 +24,8 @@ const { guard } = require('../utils/restrictions');
 const rights = require('../utils/chatRights');
 const { humanIds } = require('../utils/botEngine');
 const ChatAdminLog = require('../models/ChatAdminLog');
+const secretPolicy = require('../utils/secretPolicy');
+const { postSecretService } = require('../utils/secretService');
 const router = express.Router();
 
 function myMembership(chat, userId) {
@@ -286,11 +298,18 @@ router.post('/:chatId/secret-ttl', requireAuth, async (req, res) => {
   if (!chat || chat.type !== 'secret') return res.status(400).json({ error: 'این چت مخفی نیست' });
   // قبلاً هر کاربری می‌تونست تایمر چتِ مخفیِ دیگران رو مثلاً روی ۱ ثانیه بذاره و پیام‌هاشون رو نابود کنه
   if (!myMembership(chat, req.user._id)) return res.status(403).json({ error: 'عضو این چت نیستید' });
-  const ttl = Math.floor(Number(ttlSeconds) || 0);
-  if (ttl < 0 || ttl > 30 * 86400) return res.status(400).json({ error: 'مقدار نامعتبر است' });
+  const ttl = secretPolicy.parseTtl(ttlSeconds);
+  if (ttl === null) return res.status(400).json({ error: 'مقدار نامعتبر است' });
+  const changed = chat.secretSettings.ttlSeconds !== ttl;
   chat.secretSettings.ttlSeconds = ttl;
   await chat.save();
   res.json({ ok: true, ttlSeconds: chat.secretSettings.ttlSeconds });
+  if (changed) {
+    // طرف مقابل هم باید همان لحظه تایمر جدید را ببیند + پیام سرویس (مثل تلگرام)
+    const io = req.app.get('io');
+    io?.to(`chat:${chat._id}`).emit('secret:ttl', { chatId: String(chat._id), ttlSeconds: ttl, by: String(req.user._id) });
+    postSecretService(io, chat, req.user._id, 'secret_ttl', { ttlSeconds: ttl }).catch(() => {});
+  }
 });
 
 
@@ -374,10 +393,10 @@ router.post('/group', requireAuth, async (req, res) => {
   const blocked = await guard(req.user, 'create_groups');
   if (blocked) return res.status(403).json({ error: blocked });
 
-  const members = [{ user: req.user._id, role: 'owner' }, ...memberIds.map((id) => ({ user: id, role: 'member' }))];
-
+  const { allowed, skipped } = await filterByGroupAddPrivacy(memberIds, req.user._id);
+  const members = [{ user: req.user._id, role: 'owner' }, ...allowed.map((id) => ({ user: id, role: 'member' }))];
   const chat = await Chat.create({ type: 'group', title, description, members });
-  res.status(201).json(chat);
+  res.status(201).json({ ...chat.toObject(), skippedMembers: skipped });
 });
 
 // کانال: فقط owner/admin می‌تونن پیام بفرستن، بقیه فقط عضو/خواننده‌ن (چک دقیقش تو سوکت message:send انجام می‌شه)
@@ -387,10 +406,10 @@ router.post('/channel', requireAuth, async (req, res) => {
   const blocked = await guard(req.user, 'create_groups');
   if (blocked) return res.status(403).json({ error: blocked });
 
-  const members = [{ user: req.user._id, role: 'owner' }, ...memberIds.map((id) => ({ user: id, role: 'member' }))];
-
+  const { allowed, skipped } = await filterByGroupAddPrivacy(memberIds, req.user._id);
+  const members = [{ user: req.user._id, role: 'owner' }, ...allowed.map((id) => ({ user: id, role: 'member' }))];
   const chat = await Chat.create({ type: 'channel', title, description, members });
-  res.status(201).json(chat);
+  res.status(201).json({ ...chat.toObject(), skippedMembers: skipped });
 });
 
 // افزودن عضو به گروه - فقط owner/admin. بعد از موفقیت، کلاینت‌های عضوِ آنلاین یه رویداد می‌گیرن
@@ -406,8 +425,9 @@ router.post('/:chatId/members', requireAuth, async (req, res) => {
 
   const existingIds = new Set(chat.members.map((m) => m.user.toString()));
   const bannedIds = new Set((chat.banned || []).map((b) => b.toString()));
-  const toAdd = userIds.filter((id) => !existingIds.has(id) && !bannedIds.has(String(id)));
-  if (!toAdd.length) return res.json(chat);
+  const candidates = userIds.filter((id) => !existingIds.has(id) && !bannedIds.has(String(id)));
+  const { allowed: toAdd, skipped } = await filterByGroupAddPrivacy(candidates, req.user._id);
+  if (!toAdd.length) return res.json({ ...chat.toObject(), skippedMembers: skipped });
   chat.members.push(...toAdd.map((id) => ({ user: id, role: 'member' })));
   await chat.save();
   toAdd.forEach((uid) => rights.logAction(chat._id, req.user._id, 'add_member', uid));
@@ -418,7 +438,36 @@ router.post('/:chatId/members', requireAuth, async (req, res) => {
   io?.to(`chat:${chat._id}`).emit('group:membersChanged', { chatId: chat._id, memberIds, addedUserIds: addedHumans, reason: 'added' });
   toAdd.forEach((uid) => io?.to(`user:${uid}`).emit('group:membersChanged', { chatId: chat._id, memberIds, addedUserIds: addedHumans, reason: 'added' }));
 
-  res.json(chat);
+  res.json({ ...chat.toObject(), skippedMembers: skipped });
+});
+
+// «چه کسانی خواندند» (فقط گروه‌های کوچک، فقط برای فرستنده‌ی همان پیام): کسی که رسید خوانده‌شدنش را خاموش کرده دیده نمی‌شود،
+// و کسی که رسیدِ خودش را خاموش کرده، فهرست دیگران را هم نمی‌بیند (تقابلی؛ مثل تلگرام)
+const READERS_MAX_MEMBERS = 100;
+router.get('/:chatId/messages/:messageId/readers', requireAuth, async (req, res) => {
+  const chat = await Chat.findById(req.params.chatId).select('type members');
+  if (!chat || !chat.members.some((m) => String(m.user) === String(req.user._id))) return res.status(403).json({ error: 'دسترسی ندارید' });
+  if (chat.type !== 'group') return res.status(400).json({ error: 'فقط برای گروه', code: 'NOT_GROUP' });
+  if (chat.members.length > READERS_MAX_MEMBERS) return res.status(403).json({ error: 'گروه بزرگ است', code: 'TOO_MANY_MEMBERS' });
+  const message = await Message.findOne({ _id: req.params.messageId, chat: chat._id }).select('sender readBy');
+  if (!message) return res.status(404).json({ error: 'پیام یافت نشد' });
+  if (String(message.sender) !== String(req.user._id)) return res.status(403).json({ error: 'فقط فرستنده‌ی پیام', code: 'NOT_SENDER' });
+  if (req.user.privacy?.readReceiptsEnabled === false) return res.status(403).json({ error: 'رسید خوانده‌شدن شما خاموش است', code: 'RECEIPTS_OFF' });
+  const memberIds = new Set(chat.members.map((m) => String(m.user)));
+  const seen = new Set();
+  const rows = (message.readBy || []).filter((r) => {
+    const id = r.user && String(r.user);
+    if (!id || id === String(req.user._id) || !memberIds.has(id) || seen.has(id)) return false; // داده‌ی قدیمی ممکن است تکراری داشته باشد
+    seen.add(id);
+    return true;
+  });
+  const users = await User.find({ _id: { $in: rows.map((r) => r.user) }, 'privacy.readReceiptsEnabled': { $ne: false } }).select('displayName avatarUrl');
+  const byId = new Map(users.map((u) => [String(u._id), u]));
+  const readers = rows
+    .filter((r) => byId.has(String(r.user)))
+    .map((r) => ({ user: { _id: byId.get(String(r.user))._id, displayName: byId.get(String(r.user)).displayName, avatarUrl: byId.get(String(r.user)).avatarUrl }, readAt: r.readAt }))
+    .sort((a, b) => new Date(b.readAt) - new Date(a.readAt));
+  res.json({ readers, totalMembers: chat.members.length - 1 });
 });
 
 // پیوستن با لینک دعوت (قبل از مسیرهای /:chatId تعریف شده)
@@ -490,7 +539,7 @@ router.patch('/:chatId', requireAuth, async (req, res) => {
   if (!chat || !['group', 'channel'].includes(chat.type)) return res.status(404).json({ error: 'گروه یافت نشد' });
   const me = chat.members.find((m) => m.user.toString() === req.user._id.toString());
   if (!me || !rights.can(chat, req.user._id, 'changeInfo')) return res.status(403).json({ error: 'اجازه‌ی این کار رو نداری' });
-  const { title, description, avatarUrl, slowModeSec, permissions, joinApproval, publicUsername, signMessages, allowMemberTags } = req.body;
+  const { title, description, avatarUrl, slowModeSec, permissions, joinApproval, publicUsername, signMessages, allowMemberTags, protectedContent } = req.body;
   if (publicUsername !== undefined) {
     // فقط مالک: عمومی‌کردن/برداشتن نام کاربری گروه یا کانال
     if (me.role !== 'owner') return res.status(403).json({ error: 'فقط مالک می‌تونه نام کاربری عمومی تعیین کنه' });
@@ -516,11 +565,20 @@ router.patch('/:chatId', requireAuth, async (req, res) => {
   }
   if (typeof signMessages === 'boolean' && chat.type === 'channel') chat.signMessages = signMessages;
   if (typeof allowMemberTags === 'boolean') chat.allowMemberTags = allowMemberTags;
+  let protectedChanged = false;
+  if (typeof protectedContent === 'boolean') {
+    const gate = secretPolicy.canSetProtected(chat, me.role);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+    protectedChanged = !!chat.protectedContent !== protectedContent;
+    chat.protectedContent = protectedContent;
+  }
   if (slowModeSec !== undefined && chat.type === 'group') chat.slowModeSec = Math.max(0, Math.min(Number(slowModeSec) || 0, 86400));
   await chat.save();
   rights.logAction(chat._id, req.user._id, 'update_info', null, Object.keys(req.body).join(','));
-  req.app.get('io')?.to(`chat:${chat._id}`).emit('group:updated', { chatId: chat._id, title: chat.title, description: chat.description, avatarUrl: chat.avatarUrl, slowModeSec: chat.slowModeSec, permissions: chat.permissions, signMessages: chat.signMessages });
-  res.json({ ok: true, title: chat.title, description: chat.description, avatarUrl: chat.avatarUrl, slowModeSec: chat.slowModeSec, publicUsername: chat.publicUsername, signMessages: chat.signMessages });
+  req.app.get('io')?.to(`chat:${chat._id}`).emit('group:updated', { chatId: chat._id, title: chat.title, description: chat.description, avatarUrl: chat.avatarUrl, slowModeSec: chat.slowModeSec, permissions: chat.permissions, signMessages: chat.signMessages, protectedContent: !!chat.protectedContent });
+  // پیام سرویس فقط در «گروه» (در کانال فرستنده‌ی پست نباید لو برود، مگر signMessages)
+  if (protectedChanged && chat.type === 'group') postSecretService(req.app.get('io'), chat, req.user._id, 'protected_content', { enabled: !!chat.protectedContent }).catch(() => {});
+  res.json({ ok: true, protectedContent: !!chat.protectedContent, title: chat.title, description: chat.description, avatarUrl: chat.avatarUrl, slowModeSec: chat.slowModeSec, publicUsername: chat.publicUsername, signMessages: chat.signMessages });
 });
 
 // تغییر نقش عضو (فقط مالک): admin | member
@@ -911,10 +969,12 @@ router.get('/:chatId/messages', requireAuth, async (req, res) => {
     .sort({ createdAt: sortDir })
     .limit(effectiveLimit)
     .populate('sender', 'username displayName avatarUrl isBot')
+    .populate('forwardedFrom.originalSender', 'displayName')
+    .populate('forwardedFrom.originalChat', 'title type')
     .populate('replyTo');
 
   const decrypted = messages.map((m) => {
-    const obj = anonymizeChannelSender(chat, m.toObject());
+    const obj = shapeForwardedFrom(anonymizeChannelSender(chat, m.toObject()));
     if (chat.type !== 'secret' && !obj.e2e?.senderDeviceId && !obj.groupE2e?.ciphertext) {
       obj.content = decryptText(obj.content);
       if (obj.replyTo) obj.replyTo.content = decryptText(obj.replyTo.content);

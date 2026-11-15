@@ -48,7 +48,7 @@ app.get('/api/settings/public', async (req, res) => {
   const settings = await getSettings();
   const { getPolicy } = require('./utils/moderationPolicy');
   const policy = await getPolicy();
-  res.json({ maintenanceMode: settings.maintenanceMode, maxUploadSizeMb: settings.maxUploadSizeMb, telegramLoginEnabled: settings.telegramLoginEnabled !== false && !!process.env.TELEGRAM_BOT_TOKEN, aiScopes: policy.scopes });
+  res.json({ maintenanceMode: settings.maintenanceMode, maxUploadSizeMb: settings.maxUploadSizeMb, telegramLoginEnabled: settings.telegramLoginEnabled !== false && !!process.env.TELEGRAM_BOT_TOKEN, aiScopes: policy.scopes, aiSerious: policy.serious });
 });
 app.use(
   rateLimit({

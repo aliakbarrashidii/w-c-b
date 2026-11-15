@@ -105,6 +105,16 @@ const userSchema = new mongoose.Schema(
         source: { type: String, default: 'admin' }, // admin | auto
       },
     ],
+    // سطح‌بندی ادمین‌ها (utils/staffPolicy.js): level کمتر = ارشدتر؛ null = بدون ردیفِ صریح (سازگاری با role)
+    staff: {
+      level: { type: Number, default: null },
+      grant: [{ type: String }],
+      revoke: [{ type: String }],
+      publicKey: { type: String, default: '' }, // کلیدِ عمومیِ شخصیِ ناظر (کلیدِ خصوصی فقط روی گوشیِ خودش)
+      wrappedKeys: [{ level: Number, version: Number, sealed: { type: mongoose.Schema.Types.Mixed } }], // کلیدِ خصوصیِ ردیف، مهروموم‌شده برای همین ناظر
+      addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      addedAt: { type: Date, default: null },
+    },
     // پرونده‌ی نظارتی: چند بار گزارش شده/تأیید شده، و چند بار خودش گزارش داده/رد شده
     moderation: {
       reportsAgainst: { type: Number, default: 0 },

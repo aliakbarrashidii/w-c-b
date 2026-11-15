@@ -25,6 +25,8 @@ const { markFullyDelivered } = require('../utils/messageDelivery');
 const { startRetentionScheduler } = require('../utils/messageRetentionJob');
 const { getSettings } = require('../utils/settings');
 const SenderKeyDistribution = require('../models/SenderKeyDistribution');
+const Device = require('../models/Device');
+const { checkDeviceCoverage } = require('../utils/deviceCoverage');
 const ScheduledMessage = require('../models/ScheduledMessage');
 
 const onlineUsers = new Map(); // userId -> Set(socketId)
@@ -141,6 +143,13 @@ module.exports = function initSocket(io) {
         if (!chat) return ack?.({ error: 'چت یافت نشد' });
         const isMember = chat.members.some((m) => m.user.toString() === userId);
         if (!isMember) return ack?.({ error: 'شما عضو این چت نیستید' });
+
+        // e2eِ خصوصی: payloads باید همه‌ی دستگاه‌های اعضا را پوشش بدهد (کلاینت فهرست را کش می‌کند؛ سرور مرجع است)
+        if (e2e && Array.isArray(e2e.payloads)) {
+          const devs = await Device.find({ user: { $in: chat.members.map((m) => m.user) } }).select('user deviceId');
+          const cov = checkDeviceCoverage(devs, e2e.payloads, e2e.senderDeviceId);
+          if (!cov.ok) return ack?.({ error: 'فهرست دستگاه‌ها تغییر کرده؛ دوباره رمز می‌شود', code: 'DEVICE_LIST_STALE', devices: cov.devices });
+        }
 
         // محدودیت‌های اعمال‌شده از پنل ادمین (به‌ازای هر نوع پیام جدا)
         const restricted = await restrictionGuard(userId, MEDIA_FEATURE[type] || 'send_media');
@@ -658,6 +667,8 @@ module.exports = function initSocket(io) {
   // جاروب دوره‌ای نگهداری کلی پیام‌ها روی سرور — طبق تنظیمات پنل ادمین (models/Settings.js):
   // پیام تحویل‌شده بعد از messageRetentionSec حذف می‌شه، پیام نرسیده بعد از undeliveredMaxWaitSec
   startRetentionScheduler();
+  require('../utils/trainingJobs').startTrainingJobs(); // کالیبراسیونِ خودکارِ آستانه‌ها + پاک‌سازیِ نمونه‌های قدیمی (روزانه)
+  require('../utils/caseRouting').startEscalationSweeper(); // ارجاعِ خودکارِ پرونده‌های بدونِ رسیدگی (SLA ردیف‌ها)
 
   // جاروب دوره‌ای پیام‌های زمان‌دار - هر ۱۵ ثانیه چک می‌کنه چیزی سررسیدش رسیده یا نه (طبق ساعتِ
   // خودِ سرور، نه گوشیِ فرستنده - دقیقاً همون چیزی که برای اختلاف‌ساعت لازم بود)

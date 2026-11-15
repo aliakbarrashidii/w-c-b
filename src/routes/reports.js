@@ -4,6 +4,8 @@ const mongoose = require('mongoose');
 const Message = require('../models/Message');
 const { requireAuth } = require('../middleware/auth');
 const { guard } = require('../utils/restrictions');
+const { afterReportCreated } = require('../utils/reportHooks');
+const { validateSealedBox } = require('../utils/sealedBoxValidate');
 
 const router = express.Router();
 
@@ -11,6 +13,7 @@ router.post('/', requireAuth, async (req, res) => {
   const { targetType, targetUserId, targetMessageId, category, description, chatId, sealedContext } = req.body;
   if (!['user', 'message', 'chat'].includes(targetType)) return res.status(400).json({ error: 'نوع گزارش نامعتبر است' });
   if (!category) return res.status(400).json({ error: 'دسته‌بندی الزامی است' });
+  if (!Report.schema.path('category').enumValues.includes(category)) return res.status(400).json({ error: 'دسته‌بندیِ نامعتبر' }); // قبلاً خطای اعتبارسنجیِ mongoose = ۵۰۰
   const blocked = await guard(req.user, 'file_reports');
   if (blocked) return res.status(403).json({ error: blocked });
 
@@ -35,6 +38,7 @@ router.post('/', requireAuth, async (req, res) => {
     const dup = await Report.findOne({ reporter: req.user._id, targetType: 'chat', chat: target._id, status: { $in: ['pending', 'under_review'] } }).select('_id');
     if (dup) return res.status(409).json({ error: 'این گروه را قبلاً گزارش کرده‌اید و در حال بررسی است' });
     const created = await Report.create({ reporter: req.user._id, targetType: 'chat', category, description: description || '', chat: target._id });
+    await afterReportCreated(created, null);
     return res.status(201).json({ ok: true, id: created._id });
   }
   if (accused && String(accused) === String(req.user._id)) return res.status(400).json({ error: 'نمی‌تونی خودت رو گزارش کنی' });
@@ -52,9 +56,10 @@ router.post('/', requireAuth, async (req, res) => {
     category,
     description: description || '',
     chat,
-    sealedContext: sealedContext?.ciphertext ? sealedContext : null, // بافتِ رمزشده‌ی چت‌های E2E (فقط با کلید ادمین باز می‌شه)
+    sealedContext: (sealedContext ? validateSealedBox(sealedContext).value : null) || null, // فقط ساختارِ معتبر (v1/v2) ذخیره می‌شود // بافتِ رمزشده‌ی چت‌های E2E (فقط با کلید ادمین باز می‌شه)
   });
   if (accused) await require('../models/User').updateOne({ _id: accused }, { $inc: { 'moderation.reportsAgainst': 1 } });
+  await afterReportCreated(report, accused || null);
   res.status(201).json({ ok: true, id: report._id });
 });
 

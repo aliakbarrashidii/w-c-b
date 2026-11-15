@@ -56,11 +56,11 @@ test('a newer write wins; far-future stamps and invalid values are rejected', { 
 });
 
 test('lock prefs sync; PIN, enabled flag are never stored', { skip: SKIP }, async () => {
-  const r = await patch({ lockPrefs: { autoLockMode: 'timer', autoLockMinutes: 7, hideNotificationContent: false, enabled: true, pin: '1234' }, lockPrefsAt: NOW() });
+  const r = await patch({ lockPrefs: { autoLockMode: 'timer', autoLockMinutes: 7, hideNotificationContent: false, enabled: true, pin: 'PIN-SECRET-4821' }, lockPrefsAt: NOW() });
   assert.equal(r.status, 200);
   const doc = await User.findOne({ username: 'carol' }).lean();
   assert.deepEqual({ ...doc.appSettings.lockPrefs }, { autoLockMode: 'timer', autoLockMinutes: 7, hideNotificationContent: false });
-  assert.ok(!JSON.stringify(doc).includes('1234'));
+  assert.ok(!JSON.stringify(doc).includes('PIN-SECRET-4821'));   // مقدارِ یکتا؛ «1234» با شناسه‌ها/زمان‌های تصادفیِ سند گاهی یکی می‌شد (تستِ ناپایدار)
   assert.equal((await patch({ lockPrefs: { autoLockMinutes: 99999 }, lockPrefsAt: NOW() + 10 })).status, 400);
 });
 

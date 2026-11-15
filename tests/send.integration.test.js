@@ -169,3 +169,27 @@ test('پیامی که «همان لحظه‌ی اتصال» فرستاده شو�
     assert.ok(res.ok, JSON.stringify(res));
   }
 });
+
+test('e2e خصوصی: فهرستِ دستگاهِ ناقص (کشِ کلاینت) ⇒ DEVICE_LIST_STALE با فهرستِ درست؛ کامل ⇒ ok', { skip: SKIP }, async () => {
+  const Device = require('../src/models/Device');
+  const dev = (user, deviceId) => ({ user: user._id, deviceId, identityKeyPub: 'k', identitySignKeyPub: 'k', signedPrekeyId: 1, signedPrekeyPub: 'k', signedPrekeySig: 'k' });
+  await Device.deleteMany({});
+  await Device.insertMany([dev(A, 'a1'), dev(B, 'b1')]);
+  const wire = (ids) => ({ senderDeviceId: 'a1', payloads: ids.map((deviceId) => ({ deviceId, header: {}, nonce: 'n', ciphertext: 'c' })) });
+  const base = () => ({ chatId: String(chat._id), type: 'text', content: '', clientId: cid() });
+  // کاملِ کامل (فقط b1؛ دستگاهِ فرستنده a1 لازم نیست)
+  assert.equal((await send(clientA, { ...base(), e2e: wire(['b1']) })).error, undefined);
+  // مخاطب دستگاهِ تازه ثبت می‌کند، ولی کلاینت هنوز لیستِ قدیمی را در کش دارد
+  await Device.create(dev(B, 'b2'));
+  const stale = await send(clientA, { ...base(), e2e: wire(['b1']) });
+  assert.equal(stale.code, 'DEVICE_LIST_STALE');
+  assert.deepEqual(stale.devices[String(B._id)].sort(), ['b1', 'b2']);
+  assert.equal(await Message.countDocuments({ chat: chat._id, clientId: { $exists: true }, 'e2e.payloads.0.deviceId': 'b1' }), 1); // پیامِ ناقص ذخیره نشد (فقط اولی)
+  // بعد از رمزِ دوباره با فهرستِ درست
+  assert.equal((await send(clientA, { ...base(), e2e: wire(['b1', 'b2']) })).error, undefined);
+  // دستگاهِ دیگرِ خودِ فرستنده هم باید پوشش داده شود
+  await Device.create(dev(A, 'a2'));
+  assert.equal((await send(clientA, { ...base(), e2e: wire(['b1', 'b2']) })).code, 'DEVICE_LIST_STALE');
+  assert.equal((await send(clientA, { ...base(), e2e: wire(['a2', 'b1', 'b2']) })).error, undefined);
+  await Device.deleteMany({});
+});

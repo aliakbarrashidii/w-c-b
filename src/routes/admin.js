@@ -10,6 +10,7 @@ const InviteCode = require('../models/InviteCode');
 const ContactRequest = require('../models/ContactRequest');
 const Report = require('../models/Report');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { loadStaff, requirePerm } = require('../middleware/staff');
 const { encryptText, decryptText } = require('../utils/crypto');
 const { getSettings, updateSettings } = require('../utils/settings');
 const ModerationModel = require('../models/ModerationModel');
@@ -70,6 +71,7 @@ router.post('/login', adminLoginLimiter, async (req, res) => {
 });
 
 router.use(requireAuth, requireRole('admin', 'moderator'));
+router.use(loadStaff); // ردیف/دسترسی‌های ادمین (req.staff)
 
 // --- ابطال توکن‌ها ---
 // خروج از همه‌ی دستگاه‌های خودم (ادمین/ناظر)
@@ -149,12 +151,17 @@ router.get('/users/:id', async (req, res) => {
   res.json(user);
 });
 
-router.post('/users/:id/suspend', async (req, res) => {
+router.post('/users/:id/suspend', requirePerm('users.restrict'), async (req, res) => {
   const { reason = '' } = req.body;
   const hours = clampNumber(req.body?.hours, 1, 24 * 365, 24); // قبلاً بدون سقف/اعتبارسنجی (NaN ← تاریخ نامعتبر)
   const user = await User.findById(req.params.id);
   if (!user) return res.status(404).json({ error: 'کاربر یافت نشد' });
-  if (!canActOn(req.user.role, user.role) || String(user._id) === String(req.user._id)) return res.status(403).json({ error: 'اجازه‌ی این اقدام روی این حساب را ندارید' });
+  // ردیف‌ها: فقط روی کاربرِ عادی یا ادمینِ پایین‌تر؛ و مدتِ تعلیق از سقفِ ردیفِ خودت (maxRestrictDays) بیشتر نشود
+  const SP = require('../utils/staffPolicy');
+  const targetIsStaff = SP.levelOf(user) !== null;
+  if (String(user._id) === String(req.user._id) || (targetIsStaff && !SP.canActOnStaff(req.user, user, req.staff.tiers))) return res.status(403).json({ error: 'اجازه‌ی این اقدام روی این حساب را ندارید' });
+  const cap = req.staff.tier?.maxRestrictDays || 0;
+  if (cap > 0 && hours > cap * 24) return res.status(403).json({ error: `سقفِ مدتِ محدودیت برای ردیفِ شما ${cap} روز است`, code: 'RESTRICT_CAP' });
   user.status = 'suspended';
   user.suspendedUntil = new Date(Date.now() + hours * 3600 * 1000);
   user.banReason = reason;
@@ -186,7 +193,7 @@ router.post('/users/:id/unban', requireRole('admin'), async (req, res) => {
 });
 
 // --- مدیریت چت‌ها و پیام‌ها (طبق ToS: قابل مشاهده برای ادمین) ---
-router.get('/chats', async (req, res) => {
+router.get('/chats', requirePerm('chats.browse'), async (req, res) => {
   const { q = '', type } = req.query;
   const page = Math.max(1, Math.floor(clampNumber(req.query.page, 1, 100000, 1)));
   const limit = Math.floor(clampNumber(req.query.limit, 1, 100, 30));
@@ -205,7 +212,7 @@ router.get('/chats', async (req, res) => {
   res.json({ chats, total });
 });
 
-router.get('/chats/:id/messages', async (req, res) => {
+router.get('/chats/:id/messages', requirePerm('chats.browse'), async (req, res) => {
   const page = Math.max(1, Math.floor(clampNumber(req.query.page, 1, 100000, 1)));
   const limit = Math.floor(clampNumber(req.query.limit, 1, 200, 50));
   const chat = await Chat.findById(req.params.id).populate('members.user', 'username displayName avatarUrl isBot');
@@ -235,7 +242,7 @@ router.get('/chats/:id/messages', async (req, res) => {
 // نکته مهم: چون content روی دیتابیس رمزنگاری‌شده، ایندکس متنی Mongo دیگر روی محتوا کار نمی‌کند.
 // به همین دلیل ابتدا یک بازه محدود (بر اساس تاریخ/فلگ) واکشی می‌شود، سپس رمزگشایی و فیلتر متنی
 // در سطح اپلیکیشن انجام می‌شود. برای حجم بالا، این بخش باید به یک صف پردازش پس‌زمینه منتقل شود.
-router.get('/messages/search', async (req, res) => {
+router.get('/messages/search', requirePerm('chats.browse'), async (req, res) => {
   const { q = '', flaggedOnly = false, page = 1, limit = 30 } = req.query;
   const filter = {};
   if (flaggedOnly === 'true') filter.flagged = true;
@@ -263,7 +270,7 @@ router.get('/messages/search', async (req, res) => {
   res.json(decrypted);
 });
 
-router.delete('/messages/:id', async (req, res) => {
+router.delete('/messages/:id', requirePerm('cases.confirm'), async (req, res) => {
   const message = await Message.findById(req.params.id);
   if (!message) return res.status(404).json({ error: 'پیام یافت نشد' });
   message.deletedForEveryone = true;
@@ -358,7 +365,7 @@ router.get('/broadcasts', requireRole('admin'), async (req, res) => {
 
 
 // --- گزارش‌های کاربران (پیام/کاربر مشکل‌دار) ---
-router.get('/reports', async (req, res) => {
+router.get('/reports', requirePerm('reports.legacy_lists'), async (req, res) => {
   const { resolved } = req.query;
   const filter = resolved !== undefined ? { resolved: resolved === 'true' } : {};
   const items = await Report.find(filter)
@@ -370,7 +377,7 @@ router.get('/reports', async (req, res) => {
   res.json(items);
 });
 
-router.post('/reports/:id/resolve', async (req, res) => {
+router.post('/reports/:id/resolve', requirePerm('reports.legacy_lists'), async (req, res) => {
   await Report.findByIdAndUpdate(req.params.id, { resolved: true });
   res.json({ ok: true });
 });
@@ -468,7 +475,7 @@ router.delete('/moderation/model/:lang', requireRole('admin'), async (req, res) 
 
 // --- گزارش‌های رمزشده‌ی خودکار (فاز ۳) - محتوای واقعی فقط با کلید خصوصی ادمین قابل خوندنه؛
 // این‌جا فقط لیستشون می‌کنیم، رمزگشایی سمت ادمین (بعداً که پنل رو فرستادی وصلش می‌کنم) اتفاق میفته ---
-router.get('/reports/encrypted', async (req, res) => {
+router.get('/reports/encrypted', requirePerm('reports.legacy_lists'), async (req, res) => {
   const items = await EncryptedReport.find({})
     .sort({ createdAt: -1 })
     .limit(150)

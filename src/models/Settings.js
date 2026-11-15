@@ -30,6 +30,10 @@ const settingsSchema = new mongoose.Schema(
     moderationPolicy: { type: mongoose.Schema.Types.Mixed, default: {} },
     // سیاست ربات‌ها: آیا کاربران می‌تونن ربات بسازن، حداکثر تعداد، محدودیت عامل‌های هوش مصنوعی (هزینه‌ی LLM)
     botPolicy: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // ردیف‌های ادمین / مسیریابیِ گزارش‌ها / کلیدهای عمومیِ ردیف‌ها (utils/staffPolicy.js)
+    staffTiers: { type: mongoose.Schema.Types.Mixed, default: null },
+    moderationRouting: { type: mongoose.Schema.Types.Mixed, default: {} },
+    moderationTierKeys: { type: mongoose.Schema.Types.Mixed, default: {} }, // { '<level>': { publicKey, version } }
     telegramLoginEnabled: { type: Boolean, default: true },
     // دسترسی ناظرها به پیام چت‌ها: 'all' = همه‌ی چت‌های غیر E2E (پیش‌فرض؛ رفتار قبلی)، 'reported' = فقط چت‌هایی که گزارش بازِ در حال بررسی دارن (حفظ حریم خصوصی)
     moderatorChatAccess: { type: String, enum: ['all', 'reported'], default: 'all' },
